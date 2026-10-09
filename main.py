@@ -30,7 +30,8 @@ import sounddevice as sd
 import speech_recognition as sr
 from gtts import gTTS
 from playsound import playsound
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import tkinter as tk
 
 try:
@@ -337,7 +338,7 @@ class VoiceAssistantApp:
         self.allowed_apps: dict[str, str] = dict(
             getattr(config, "ALLOWED_APPS", {}) or {}
         )
-        self.model = None
+        self.client = None
         self.chat = None
         self.tray_icon = None
 
@@ -564,20 +565,22 @@ class VoiceAssistantApp:
 
     def _configure_gemini(self) -> None:
         if not self.api_key or self.api_key == PLACEHOLDER_KEY:
-            self.model = None
+            self.client = None
             self.chat = None
             self._set_status("Set your Gemini API key in Settings to start chatting.", AMBER)
             return
-        genai.configure(api_key=self.api_key)
-        history = list(self.chat.history) if self.chat is not None else []
-        self.model = genai.GenerativeModel(
-            GEMINI_MODEL,
-            system_instruction=(
-                f"You are {self.assistant_name}, a friendly voice assistant. "
-                "Keep answers clear and conversational."
+        self.client = genai.Client(api_key=self.api_key)
+        history = self.chat.get_history() if self.chat is not None else []
+        self.chat = self.client.chats.create(
+            model=GEMINI_MODEL,
+            config=types.GenerateContentConfig(
+                system_instruction=(
+                    f"You are {self.assistant_name}, a friendly voice assistant. "
+                    "Keep answers clear and conversational."
+                ),
             ),
+            history=list(history),
         )
-        self.chat = self.model.start_chat(history=history)
         self._set_status(f'Ready — say "{self.assistant_name}" to talk')
 
     # ----- Thread-safe UI updates -------------------------------------------

@@ -1,4 +1,4 @@
-google-generativeai
+google-genai
 SpeechRecognition
 gTTS
 # playsound 1.3.0 is broken; 1.2.2 works reliably on Windows
