@@ -38,8 +38,20 @@ SAMPLE_RATE = 16000  # samples per second
 CHUNK_SECONDS = 0.1  # how often the mic level is checked
 SILENCE_THRESHOLD = 0.01  # RMS level treated as speech vs. silence
 WAIT_FOR_SPEECH_SECONDS = 5  # give up if the user says nothing
-SILENCE_SECONDS = 1.2  # stop after this much trailing silence
+SILENCE_SECONDS = 0.8  # stop recording 0.8 s after you finish speaking
 MAX_SECONDS = 10  # hard cap on one recording
+
+
+def fresh_engine() -> pyttsx3.Engine:
+    """Return a new pyttsx3 engine for one utterance.
+
+    Reusing a single engine across runAndWait() calls can make pyttsx3 fall
+    silent after the first line on Windows, so every reply gets a fresh
+    engine to guarantee it is actually spoken.
+    """
+    new_engine = pyttsx3.init()
+    new_engine.setProperty("rate", 175)  # speaking speed
+    return new_engine
 
 
 def record_question() -> sr.AudioData | None:
@@ -103,6 +115,8 @@ def transcribe(audio: sr.AudioData) -> str | None:
 
 
 def main() -> None:
+    global engine  # refreshed before each utterance (see fresh_engine)
+
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
         sys.exit("Set your Gemini API key in config.py before running.")
 
@@ -143,6 +157,7 @@ def main() -> None:
 
         if question.lower().strip() == "quit":
             print(f"{ASSISTANT_NAME}: Goodbye!")
+            engine = fresh_engine()
             engine.say("Goodbye!")
             engine.runAndWait()
             break
@@ -153,8 +168,9 @@ def main() -> None:
         except Exception as error:  # noqa: BLE001 - keep the loop alive
             answer = f"Sorry, I ran into a problem: {error}"
 
-        # Print AND speak every reply.
+        # Print and speak EVERY reply, not just the opening line.
         print(f"{ASSISTANT_NAME}: {answer}\n")
+        engine = fresh_engine()  # fresh engine so pyttsx3 never falls silent
         engine.say(answer)
         engine.runAndWait()
 
