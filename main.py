@@ -764,11 +764,9 @@ class VoiceAssistantApp:
                                      justify=tk.RIGHT,
                                      lmargin1=60, lmargin2=60)
         self.chat_view.tag_configure("assistant_text", foreground=MUTED,
-                                     justify=tk.LEFT,
-                                     rmargin1=60, rmargin2=60)
+                                     justify=tk.LEFT)
         self.chat_view.tag_configure("system_text", foreground=MUTED,
-                                     lmargin1=60, lmargin2=60,
-                                     rmargin1=60, rmargin2=60)
+                                     lmargin1=60, lmargin2=60)
         self.chat_view.tag_configure("typing_line", foreground=MUTED,
                                      font=("Segoe UI", 10, "italic"))
         self.chat_view.tag_configure("copy_link", foreground=WHITE,
