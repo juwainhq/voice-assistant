@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nova — Avatar picker</title>
+<style>
+  :root { --black:#000; --panel:#0A0A0A; --gray:#141414; --border:#242424; --white:#FAFAFA; --muted:#8C8C8C; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--black); color: var(--white);
+    font-family: 'Segoe UI', sans-serif; padding: 28px 20px 60px;
+  }
+  h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: .4px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }
+  button {
+    background: var(--gray); color: var(--white); border: 1px solid var(--border);
+    padding: 9px 16px; font-family: inherit; font-size: 13px; cursor: pointer;
+  }
+  button:hover { background: var(--white); color: var(--black); }
+  button.active { background: var(--white); color: var(--black); font-weight: 600; }
+  .row { display: flex; flex-wrap: wrap; gap: 20px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 20px; width: 280px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 6px; letter-spacing: .3px; }
+  .card p { color: var(--muted); font-size: 12px; line-height: 1.55; margin: 0 0 14px; min-height: 68px; }
+  .card svg { display: block; margin: 0 auto; background: var(--gray); }
+  .tag { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+  <h1>Choose the avatar</h1>
+  <p class="hint">All three faces run the same emotion at the same time. Tap an emotion to compare — or let it cycle. Then tell me which one you want (A, B, or C).</p>
+
+  <div class="controls" id="controls">
+    <button data-emo="idle">Idle</button>
+    <button data-emo="happy">Happy</button>
+    <button data-emo="listening">Listening</button>
+    <button data-emo="thinking">Thinking</button>
+    <button data-emo="talking">Talking</button>
+    <button data-emo="sad">Sad</button>
+    <button data-emo="auto" class="active">Auto cycle</button>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <div class="tag">Option A</div>
+      <h2>Calm pearl head</h2>
+      <p>Your build's design: big solid dark eyes with one glint each, small mouth. Very slow pupil drift, a barely-there breath at rest, completely still while talking. The whole ball does not bounce.</p>
+      <svg viewBox="0 0 100 100" width="230" height="230">
+        <g class="bob">
+          <circle class="shadow" cx="53" cy="51.8" r="42" fill="#8C8C8C"/>
+          <circle class="head" cx="50" cy="50" r="42" fill="#FAFAFA"/>
+          <path class="shineArc" d="M 18 34 A 26 26 0 0 1 37 13" stroke="#8C8C8C" stroke-width="3" fill="none" stroke-linecap="round"/>
+          <circle class="shineDot" cx="47.5" cy="17.4" r="2.2" fill="#8C8C8C"/>
+          <line class="browL" x1="23" y1="28" x2="46" y2="28" stroke="#000" stroke-width="3"/>
+          <line class="browR" x1="54" y1="28" x2="77" y2="28" stroke="#000" stroke-width="3"/>
+          <ellipse class="scleraL" visibility="hidden" fill="#FAFAFA" stroke="#8C8C8C"/>
+          <ellipse class="scleraR" visibility="hidden" fill="#FAFAFA" stroke="#8C8C8C"/>
+          <ellipse class="eyeL" fill="#000"/>
+          <ellipse class="eyeR" fill="#000"/>
+          <circle class="glintL1" fill="#FAFAFA"/>
+          <circle class="glintR1" fill="#FAFAFA"/>
+          <circle class="glintL2" visibility="hidden" fill="#FAFAFA"/>
+          <circle class="glintR2" visibility="hidden" fill="#FAFAFA"/>
+          <ellipse class="cheekL" visibility="hidden" fill="#8C8C8C" opacity="0.55"/>
+          <ellipse class="cheekR" visibility="hidden" fill="#8C8C8C" opacity="0.55"/>
+          <path class="happyL" d="M 19 51 Q 34.5 65 50 51" stroke="#000" stroke-width="4" fill="none" visibility="hidden"/>
+          <path class="happyR" d="M 50 51 Q 65.5 65 81 51" stroke="#000" stroke-width="4" fill="none" visibility="hidden"/>
+          <path class="mouthArc" d="M 35 68 Q 50 78 65 68" stroke="#000" stroke-width="3" fill="none"/>
+          <ellipse class="mouthOpen" cx="50" cy="71" rx="8.4" ry="4" fill="#000" visibility="hidden"/>
+        </g>
+      </svg>
+    </div>
+
+    <div class="card">
+      <div class="tag">Option B</div>
+      <h2>Kawaii eyes + calm motion</h2>
+      <p>The "bubbly ball with eyes" look: white sclera, big dark pupils with two glints each, soft cheek dots — combined with the calm motion rules from your build (no bouncing, still while talking).</p>
+      <svg viewBox="0 0 100 100" width="230" height="230">
+        <g class="bob">
+          <circle class="shadow" cx="53" cy="51.8" r="42" fill="#8C8C8C"/>
+          <circle class="head" cx="50" cy="50" r="42" fill="#FAFAFA"/>
+          <path class="shineArc" d="M 18 34 A 26 26 0 0 1 37 13" stroke="#8C8C8C" stroke-width="3" fill="none" stroke-linecap="round"/>
+          <circle class="shineDot" cx="47.5" cy="17.4" r="2.2" fill="#8C8C8C"/>
+          <line class="browL" x1="23" y1="28" x2="46" y2="28" stroke="#000" stroke-width="3"/>
+          <line class="browR" x1="54" y1="28" x2="77" y2="28" stroke="#000" stroke-width="3"/>
+          <ellipse class="scleraL" fill="#FAFAFA" stroke="#8C8C8C"/>
+          <ellipse class="scleraR" fill="#FAFAFA" stroke="#8C8C8C"/>
+          <ellipse class="eyeL" fill="#000"/>
+          <ellipse class="eyeR" fill="#000"/>
+          <circle class="glintL1" fill="#FAFAFA"/>
+          <circle class="glintR1" fill="#FAFAFA"/>
+          <circle class="glintL2" fill="#FAFAFA"/>
+          <circle class="glintR2" fill="#FAFAFA"/>
+          <ellipse class="cheekL" fill="#8C8C8C" opacity="0.55"/>
+          <ellipse class="cheekR" fill="#8C8C8C" opacity="0.55"/>
+          <path class="happyL" d="M 19 51 Q 34.5 65 50 51" stroke="#000" stroke-width="4" fill="none" visibility="hidden"/>
+          <path class="happyR" d="M 50 51 Q 65.5 65 81 51" stroke="#000" stroke-width="4" fill="none" visibility="hidden"/>
+          <path class="mouthArc" d="M 35 68 Q 50 78 65 68" stroke="#000" stroke-width="3" fill="none"/>
+          <ellipse class="mouthOpen" cx="50" cy="71" rx="8.4" ry="4" fill="#000" visibility="hidden"/>
+        </g>
+      </svg>
+    </div>
+
+    <div class="card">
+      <div class="tag">Option C</div>
+      <h2>Kawaii bubbly ball (original)</h2>
+      <p>The original "Grok Bot bubly ball with eyes": same kawaii face as B, plus gentle bobbing and squash &amp; stretch so it feels like a live bubble. Mouth chatters faster while talking.</p>
+      <svg viewBox="0 0 100 100" width="230" height="230">
+        <g class="bob">
+          <circle class="shadow" cx="53" cy="51.8" r="42" fill="#8C8C8C"/>
+          <circle class="head" cx="50" cy="50" r="42" fill="#FAFAFA"/>
+          <path class="shineArc" d="M 18 34 A 26 26 0 0 1 37 13" stroke="#8C8C8C" stroke-width="3" fill="none" stroke-linecap="round"/>
+          <circle class="shineDot" cx="47.5" cy="17.4" r="2.2" fill="#8C8C8C"/>
+          <line class="browL" x1="23" y1="28" x2="46" y2="28" stroke="#000" stroke-width="3"/>
+          <line class="browR" x1="54" y1="28" x2="77" y2="28" stroke="#000" stroke-width="3"/>
+          <ellipse class="scleraL" fill="#FAFAFA" stroke="#8C8C8C"/>
+          <ellipse class="scleraR" fill="#FAFAFA" stroke="#8C8C8C"/>
+          <ellipse class="eyeL" fill="#000"/>
+          <ellipse class="eyeR" fill="#000"/>
+          <circle class="glintL1" fill="#FAFAFA"/>
+          <circle class="glintR1" fill="#FAFAFA"/>
+          <circle class="glintL2" fill="#FAFAFA"/>
+          <circle class="glintR2" fill="#FAFAFA"/>
+          <ellipse class="cheekL" fill="#8C8C8C" opacity="0.55"/>
+          <ellipse class="cheekR" fill="#8C8C8C" opacity="0.55"/>
+          <path class="happyL" d="M 19 51 Q 34.5 65 50 51" stroke="#000" stroke-width="4" fill="none" visibility="hidden"/>
+          <path class="happyR" d="M 50 51 Q 65.5 65 81 51" stroke="#000" stroke-width="4" fill="none" visibility="hidden"/>
+          <path class="mouthArc" d="M 35 68 Q 50 78 65 68" stroke="#000" stroke-width="3" fill="none"/>
+          <ellipse class="mouthOpen" cx="50" cy="71" rx="8.4" ry="4" fill="#000" visibility="hidden"/>
+        </g>
+      </svg>
+    </div>
+  </div>
+
+<script>
+'use strict';
+
+const faces = [
+  { el: document.querySelectorAll('svg')[0], motion: 'calm',   eyes: 'solid',  talkSpeed: 4.5 },
+  { el: document.querySelectorAll('svg')[1], motion: 'calm',   eyes: 'kawaii', talkSpeed: 4.5 },
+  { el: document.querySelectorAll('svg')[2], motion: 'bouncy', eyes: 'kawaii', talkSpeed: 11  },
+];
+
+const q = (svg, cls) => svg.querySelector('.' + cls);
+let emotion = 'idle', auto = true, t = 0, blinkIn = 3.0, blinkLeft = 0, lastTs = 0, cycleT = 0;
+const CYCLE = ['idle', 'listening', 'thinking', 'talking', 'happy', 'sad'];
+
+function setEmotion(emo) {
+  if (emo === 'auto') { auto = true; return; }
+  auto = false;
+  if (['idle', 'happy', 'listening', 'thinking', 'talking', 'sad'].includes(emo)) emotion = emo;
+}
+
+document.getElementById('controls').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  setEmotion(b.dataset.emo);
+  for (const btn of document.querySelectorAll('#controls button'))
+    btn.classList.toggle('active', btn === b);
+});
+
+function renderFace(f, emo, blink) {
+  const svg = f.el;
+  const bob = q(svg, 'bob');
+
+  // Motion: calm breath (still while talking) vs bouncy bubble
+  let dy = 0, sq = 0;
+  if (f.motion === 'calm') {
+    const breath = emo === 'talking' ? 0 : Math.sin(t * 0.8);
+    dy = breath * 0.6; sq = breath * 0.004;
+  } else {
+    const speed = emo === 'talking' ? 3.2 : 1.7;
+    const amp = ['talking', 'happy', 'listening'].includes(emo) ? 2.6 : 1.1;
+    dy = Math.sin(t * speed) * amp; sq = Math.sin(t * speed * 1.5) * 0.035;
+  }
+  bob.setAttribute('transform',
+    `translate(50 50) scale(${(1 + sq).toFixed(4)} ${(1 - sq).toFixed(4)}) translate(-50 -50) translate(0 ${dy.toFixed(2)})`);
+
+  const happyEyes = emo === 'happy' || emo === 'talking';
+  const kawaii = f.eyes === 'kawaii';
+  const ew = emo === 'listening' ? 11.5 : 9.8;
+  let eh = emo === 'listening' ? 15 : 12.8;
+  if (blink && !happyEyes) eh = 1.6;
+
+  let pdx = 0, pdy = 0;
+  if (emo === 'thinking') { pdx = Math.sin(t * 0.9) * 1.8; pdy = -1.6; }
+  else if (emo === 'sad') pdy = 1.6;
+  else if (emo !== 'listening') pdx = Math.sin(t * 0.5) * 0.6;
+
+  for (const side of [-1, 1]) {
+    const cx = 50 + side * 15.5;
+    const sclera = q(svg, side < 0 ? 'scleraL' : 'scleraR');
+    const eye = q(svg, side < 0 ? 'eyeL' : 'eyeR');
+    const g1 = q(svg, side < 0 ? 'glintL1' : 'glintR1');
+    const g2 = q(svg, side < 0 ? 'glintL2' : 'glintR2');
+    const happy = q(svg, side < 0 ? 'happyL' : 'happyR');
+
+    if (happyEyes) {
+      sclera.setAttribute('visibility', 'hidden');
+      eye.setAttribute('visibility', 'hidden');
+      g1.setAttribute('visibility', 'hidden'); g2.setAttribute('visibility', 'hidden');
+      happy.setAttribute('visibility', 'visible');
+      continue;
+    }
+    happy.setAttribute('visibility', 'hidden');
+    const ecx = cx + pdx, ecy = 51 + pdy;
+
+    if (!kawaii) {
+      sclera.setAttribute('visibility', 'hidden');
+      g2.setAttribute('visibility', 'hidden');
+      eye.setAttribute('visibility', 'visible'); g1.setAttribute('visibility', 'visible');
+      eye.setAttribute('cx', ecx.toFixed(2)); eye.setAttribute('cy', ecy.toFixed(2));
+      eye.setAttribute('rx', ew); eye.setAttribute('ry', Math.max(eh, 1.2).toFixed(2));
+      g1.setAttribute('cx', (ecx - ew * 0.44).toFixed(2));
+      g1.setAttribute('cy', (ecy - eh * 0.5).toFixed(2));
+      g1.setAttribute('r', (ew * 0.36).toFixed(2));
+    } else {
+      sclera.setAttribute('visibility', 'visible');
+      if (blink) {
+        sclera.setAttribute('fill', '#000'); sclera.setAttribute('stroke', 'none');
+        sclera.setAttribute('cx', cx); sclera.setAttribute('cy', 51);
+        sclera.setAttribute('rx', 12); sclera.setAttribute('ry', 1.4);
+        eye.setAttribute('visibility', 'hidden');
+        g1.setAttribute('visibility', 'hidden'); g2.setAttribute('visibility', 'hidden');
+      } else {
+        sclera.setAttribute('fill', '#FAFAFA'); sclera.setAttribute('stroke', '#8C8C8C');
+        const sw = emo === 'listening' ? 13 : 12, sh = emo === 'listening' ? 17 : 15;
+        sclera.setAttribute('cx', cx); sclera.setAttribute('cy', 51);
+        sclera.setAttribute('rx', sw); sclera.setAttribute('ry', sh);
+        eye.setAttribute('visibility', 'visible');
+        g1.setAttribute('visibility', 'visible'); g2.setAttribute('visibility', 'visible');
+        eye.setAttribute('cx', ecx.toFixed(2)); eye.setAttribute('cy', (ecy + 1).toFixed(2));
+        eye.setAttribute('rx', sw * 0.62); eye.setAttribute('ry', sh * 0.66);
+        g1.setAttribute('cx', (ecx - sw * 0.26).toFixed(2)); g1.setAttribute('cy', (ecy - sh * 0.3).toFixed(2));
+        g1.setAttribute('r', sw * 0.26);
+        g2.setAttribute('cx', (ecx + sw * 0.28).toFixed(2)); g2.setAttribute('cy', (ecy + sh * 0.3).toFixed(2));
+        g2.setAttribute('r', sw * 0.13);
+      }
+    }
+  }
+
+  // Brows
+  const lift = 3, base = 28;
+  let b1 = [23, base, 46, base], b2 = [54, base, 77, base];
+  if (emo === 'listening') { b1 = [23, base - lift, 46, base - lift]; b2 = [54, base - lift, 77, base - lift]; }
+  else if (emo === 'thinking') { b1 = [23, base - lift, 46, base - lift * 0.2]; b2 = [54, base - lift * 0.2, 77, base - lift]; }
+  else if (emo === 'sad') { b1 = [23, base + lift * 0.4, 46, base - lift * 0.5]; b2 = [54, base - lift * 0.5, 77, base + lift * 0.4]; }
+  else if (emo === 'happy') { b1 = [23, base - lift * 0.55, 46, base - lift * 0.55]; b2 = [54, base - lift * 0.55, 77, base - lift * 0.55]; }
+  const bl = q(svg, 'browL'), br = q(svg, 'browR');
+  bl.setAttribute('x1', b1[0]); bl.setAttribute('y1', b1[1]); bl.setAttribute('x2', b1[2]); bl.setAttribute('y2', b1[3]);
+  br.setAttribute('x1', b2[0]); br.setAttribute('y1', b2[1]); br.setAttribute('x2', b2[2]); br.setAttribute('y2', b2[3]);
+
+  // Mouth
+  const arc = q(svg, 'mouthArc'), openM = q(svg, 'mouthOpen');
+  if (emo === 'talking') {
+    arc.setAttribute('visibility', 'hidden');
+    openM.setAttribute('visibility', 'visible');
+    const cycle = (Math.sin(t * f.talkSpeed) + 1.0) * 0.5;
+    const open = f.talkSpeed > 6 ? 0.35 + 0.65 * Math.abs(Math.sin(t * 11)) : 0.3 + 0.7 * cycle;
+    openM.setAttribute('rx', 8.4);
+    openM.setAttribute('ry', (2 + open * 8.5).toFixed(2));
+  } else {
+    openM.setAttribute('visibility', 'hidden');
+    arc.setAttribute('visibility', 'visible');
+    if (emo === 'happy' || emo === 'listening') arc.setAttribute('d', 'M 31 68 Q 50 82 69 68');
+    else if (emo === 'sad') arc.setAttribute('d', 'M 32 72 Q 50 58 68 72');
+    else arc.setAttribute('d', 'M 35 68 Q 50 78 65 68');
+  }
+}
+
+function frame(ts) {
+  const dt = lastTs ? Math.min((ts - lastTs) / 1000, 0.1) : 0.08;
+  lastTs = ts; t += dt;
+  blinkIn -= dt;
+  if (blinkLeft > 0) blinkLeft -= dt;
+  else if (blinkIn <= 0) { blinkLeft = 0.12; blinkIn = 2.6 + Math.random() * 3.0; }
+
+  if (auto) {
+    cycleT += dt;
+    if (cycleT >= 4) { cycleT = 0; emotion = CYCLE[(CYCLE.indexOf(emotion) + 1) % CYCLE.length]; }
+  }
+  for (const f of faces) renderFace(f, emotion, blinkLeft > 0);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nova — Voice Assistant · UI Preview</title>
+<style>
+  /* Monochrome design system — identical tokens to main.py */
+  :root {
+    --bg: #000000;
+    --panel: #0A0A0A;
+    --card: #0A0A0A;
+    --gray: #141414;
+    --border: #242424;
+    --text: #FAFAFA;
+    --muted: #8C8C8C;
+    --white: #FAFAFA;
+    --black: #000000;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0 !important; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', sans-serif;
+    font-size: 14px;
+    display: flex;
+    overflow: hidden;
+  }
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 16px; gap: 8px; }
+
+  /* Header */
+  .header { display: flex; align-items: center; gap: 8px; padding: 4px; }
+  .title { font-size: 22px; font-weight: 700; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  #face { width: 92px; height: 92px; margin-right: 14px; flex-shrink: 0; }
+  .spacer { flex: 1; }
+
+  /* Buttons: idle #141414/white text, active white/black text. Mic: white/black */
+  button {
+    font-family: inherit; font-size: 13px; font-weight: 700;
+    background: var(--gray); color: var(--text);
+    border: none; padding: 10px 18px; cursor: pointer;
+  }
+  button:hover, button:active { background: var(--white); color: var(--black); }
+  button.mic { background: var(--white); color: var(--black); }
+  button.mic:hover { background: var(--white); color: var(--black); opacity: .85; }
+  button.small { padding: 7px 12px; }
+  button.stop { color: var(--text); }
+
+  /* Chat window */
+  .chat-wrap {
+    flex: 1; background: var(--card); border: 1px solid var(--border);
+    overflow-y: auto; padding: 14px 16px; min-height: 0;
+  }
+  .msg { margin-bottom: 14px; }
+  .msg .name { font-weight: 700; color: var(--text); }
+  .msg.system .name { color: var(--muted); }
+  .copy {
+    color: var(--white); font-size: 11px; text-decoration: underline;
+    cursor: pointer; margin-left: 10px; user-select: none;
+  }
+  .msg .body { margin-top: 4px; padding-left: 10px; color: var(--text); line-height: 1.5; }
+  .msg.system .body { color: var(--muted); }
+  .typing { color: var(--muted); font-style: italic; padding-left: 10px; }
+
+  /* Status + input row */
+  .status { color: var(--muted); font-size: 12px; padding: 2px 4px; min-height: 16px; }
+  .input-row { display: flex; gap: 10px; }
+  .input-row input[type=text] {
+    flex: 1; background: var(--gray); border: 1px solid var(--border);
+    color: var(--text); font-family: inherit; font-size: 14px; padding: 10px 12px;
+    outline: none;
+  }
+  .input-row input[type=text]:focus { border-color: var(--white); }
+
+  /* Settings panel */
+  .settings {
+    width: 300px; background: var(--panel); padding: 20px 18px;
+    overflow-y: auto; border-left: 1px solid var(--border);
+  }
+  .settings h2 { font-size: 17px; font-weight: 700; margin-bottom: 12px; }
+  .label {
+    display: block; font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    color: var(--muted); margin: 14px 0 4px;
+  }
+  .settings input[type=text], .settings input[type=password] {
+    width: 100%; background: var(--gray); border: 1px solid var(--border);
+    color: var(--text); font-family: inherit; font-size: 13px; padding: 8px 10px;
+    outline: none;
+  }
+  .settings input:focus { border-color: var(--white); }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  /* Speed slider */
+  input[type=range] {
+    width: 100%; -webkit-appearance: none; appearance: none;
+    background: var(--gray); height: 6px; margin-top: 8px; outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 22px; background: var(--white); cursor: pointer;
+  }
+  .speed-labels { display: flex; justify-content: space-between; margin-top: 4px; }
+  .speed-labels span { color: var(--muted); font-size: 11px; }
+
+  /* Allowed apps */
+  .apps-list {
+    background: var(--gray); border: 1px solid var(--border);
+    height: 96px; overflow-y: auto; margin-top: 4px; font-size: 12px;
+  }
+  .apps-list div { padding: 6px 10px; cursor: pointer; }
+  .apps-list div:hover { background: var(--white); color: var(--black); }
+  .apps-row { display: flex; gap: 8px; margin-top: 8px; }
+  .apps-row button { flex: 1; padding: 8px 0; }
+
+  .save-btn { width: 100%; margin-top: 18px; padding: 10px 0; }
+
+  .banner {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    background: var(--gray); border: 1px solid var(--border); color: var(--muted);
+    font-size: 11px; padding: 8px 14px; z-index: 10;
+  }
+  .banner b { color: var(--text); }
+</style>
+</head>
+<body>
+
+<div class="main">
+  <div class="header">
+    <svg id="face" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+      <g id="faceBob">
+        <circle cx="53" cy="51.8" r="42" fill="#8C8C8C"/>
+        <circle cx="50" cy="50" r="42" fill="#FAFAFA"/>
+        <path d="M 18 34 A 26 26 0 0 1 37 13" stroke="#8C8C8C" stroke-width="3" fill="none" stroke-linecap="round"/>
+        <circle cx="47.5" cy="17.4" r="2.2" fill="#8C8C8C"/>
+        <line id="browL" x1="23" y1="28" x2="46" y2="28" stroke="#000" stroke-width="3"/>
+        <line id="browR" x1="54" y1="28" x2="77" y2="28" stroke="#000" stroke-width="3"/>
+        <ellipse id="eyeL" cx="34.5" cy="51" rx="9.8" ry="12.8" fill="#000"/>
+        <ellipse id="eyeR" cx="65.5" cy="51" rx="9.8" ry="12.8" fill="#000"/>
+        <circle id="shineL" cx="30.2" cy="44.6" r="3.5" fill="#FAFAFA"/>
+        <circle id="shineR" cx="61.2" cy="44.6" r="3.5" fill="#FAFAFA"/>
+        <path id="eyeLH" d="M 19 51 Q 34.5 65 50 51" stroke="#000" stroke-width="4" fill="none" visibility="hidden"/>
+        <path id="eyeRH" d="M 50 51 Q 65.5 65 81 51" stroke="#000" stroke-width="4" fill="none" visibility="hidden"/>
+        <path id="mouthArc" d="M 35 68 Q 50 78 65 68" stroke="#000" stroke-width="3" fill="none"/>
+        <ellipse id="mouthOpen" cx="50" cy="71" rx="8.4" ry="4" fill="#000" visibility="hidden"/>
+      </g>
+    </svg>
+    <div>
+      <div class="title">Nova</div>
+      <div class="subtitle">voice assistant</div>
+    </div>
+    <div class="spacer"></div>
+    <button class="small" onclick="clearChat()">Clear chat</button>
+  </div>
+
+  <div class="chat-wrap" id="chat">
+    <div class="msg assistant">
+      <span class="name">Nova</span><span class="copy" onclick="copyMsg(this)">[Copy]</span>
+      <div class="body">Hello! I'm Nova, your voice assistant. Say 'Hey Nova' or 'Nova' to talk, ask me anything, or say 'search for' to look something up. Say 'help' to hear what I can do.</div>
+    </div>
+    <div class="msg user">
+      <span class="name">You</span><span class="copy" onclick="copyMsg(this)">[Copy]</span>
+      <div class="body">hey nova</div>
+    </div>
+    <div class="msg assistant">
+      <span class="name">Nova</span><span class="copy" onclick="copyMsg(this)">[Copy]</span>
+      <div class="body">Yes? I'm listening — go ahead.</div>
+    </div>
+  </div>
+
+  <div class="status" id="status">Ready — say "Hey Nova" to talk</div>
+  <div class="input-row">
+    <button class="mic" onclick="micDemo()">Mic</button>
+    <button class="stop" onclick="stopDemo()">Stop</button>
+    <input type="text" id="input" placeholder="Type a message (fallback)..."
+           onkeydown="if(event.key==='Enter') sendDemo()">
+    <button onclick="sendDemo()">Send</button>
+  </div>
+</div>
+
+<div class="settings">
+  <h2>Settings</h2>
+
+  <span class="label">ASSISTANT NAME</span>
+  <input type="text" id="name" value="Nova">
+
+  <span class="label">GEMINI API KEY</span>
+  <input type="password" id="key" value="YOUR_GEMINI_API_KEY_HERE">
+  <div class="hint">Stored in config.py</div>
+
+  <span class="label">VOICE SPEED</span>
+  <input type="range" min="0" max="2" step="1" value="1" id="speed"
+         oninput="document.getElementById('speedVal').textContent=['Slow','Normal','Fast'][this.value]">
+  <div class="speed-labels"><span>Slow</span><span id="speedVal">Normal</span><span>Fast</span></div>
+
+  <span class="label">ALLOWED APPS</span>
+  <div class="apps-list" id="apps">
+    <div onclick="fillApp(this)">Notepad — C:\Windows\System32\notepad.exe</div>
+    <div onclick="fillApp(this)">Calculator — calc.exe</div>
+  </div>
+  <input type="text" id="appName" placeholder="app name" style="margin-top:8px">
+  <input type="text" id="appPath" placeholder="file path" style="margin-top:8px">
+  <div class="apps-row">
+    <button onclick="addApp()">Add</button>
+    <button onclick="removeApp()">Remove</button>
+  </div>
+
+  <button class="save-btn" onclick="saveSettings()">Save settings</button>
+</div>
+
+<div class="banner"><b>UI preview</b> — live demo of the tkinter app's design &amp; flows (the desktop app itself runs on your PC: <b>python main.py</b>)</div>
+
+<script>
+const chat = document.getElementById('chat');
+const statusEl = document.getElementById('status');
+let timers = [];
+let typingEl = null;
+
+function setStatus(t) {
+  statusEl.textContent = t;
+  setEmotion(inferEmotion(t));
+}
+
+/* ---- Bubbly face (mirrors BubblyFace in main.py) ---- */
+const F = {
+  bob: document.getElementById('faceBob'),
+  browL: document.getElementById('browL'), browR: document.getElementById('browR'),
+  eyeL: document.getElementById('eyeL'), eyeR: document.getElementById('eyeR'),
+  shineL: document.getElementById('shineL'), shineR: document.getElementById('shineR'),
+  eyeLH: document.getElementById('eyeLH'), eyeRH: document.getElementById('eyeRH'),
+  mouthArc: document.getElementById('mouthArc'), mouthOpen: document.getElementById('mouthOpen'),
+};
+let emotion = 'idle', faceT = 0, blinkIn = 3.0, blinkLeft = 0, lastTs = 0;
+
+function inferEmotion(text) {
+  const s = text.toLowerCase();
+  if (s.includes('listening')) return 'listening';
+  if (s.includes('thinking') || s.includes('searching')) return 'thinking';
+  if (s.includes('speaking')) return 'talking';
+  if (['mic failed', "can't understand", 'sorry', 'failed'].some(b => s.includes(b))) return 'sad';
+  if (['copied', 'saved', 'cleared', 'added', 'removed', 'got it', "i'll remember"].some(g => s.includes(g))) return 'happy';
+  return 'idle';
+}
+function setEmotion(e) {
+  if (['idle', 'happy', 'listening', 'thinking', 'talking', 'sad'].includes(e)) emotion = e;
+}
+
+function faceFrame(ts) {
+  const dt = lastTs ? Math.min((ts - lastTs) / 1000, 0.1) : 0.08;
+  lastTs = ts;
+  faceT += dt;
+  blinkIn -= dt;
+  if (blinkLeft > 0) blinkLeft -= dt;
+  else if (blinkIn <= 0) { blinkLeft = 0.12; blinkIn = 2.6 + Math.random() * 3.0; }
+
+  const emo = emotion;
+  // Calm pearl head: a slow, tiny breath; perfectly still while talking
+  const breath = emo === 'talking' ? 0 : Math.sin(faceT * 0.8);
+  const dy = breath * 0.6, sq = breath * 0.004;
+  F.bob.setAttribute('transform',
+    `translate(50 50) scale(${(1 + sq).toFixed(4)} ${(1 - sq).toFixed(4)}) translate(-50 -50) translate(0 ${dy.toFixed(2)})`);
+
+  const happyEyes = emo === 'happy' || emo === 'talking';
+  const blinking = blinkLeft > 0 && !happyEyes;
+  const ew = emo === 'listening' ? 11.5 : 9.8;
+  let eh = emo === 'listening' ? 15 : 12.8;
+  if (blinking) eh = 1.6;
+  let pdx = 0, pdy = 0;
+  if (emo === 'thinking') { pdx = Math.sin(faceT * 0.9) * 1.8; pdy = -1.6; }
+  else if (emo === 'sad') pdy = 1.6;
+  else if (emo !== 'listening') pdx = Math.sin(faceT * 0.5) * 0.6;
+
+  for (const [eye, happy, shine, cx] of [[F.eyeL, F.eyeLH, F.shineL, 34.5], [F.eyeR, F.eyeRH, F.shineR, 65.5]]) {
+    if (happyEyes) {
+      eye.setAttribute('visibility', 'hidden'); shine.setAttribute('visibility', 'hidden');
+      happy.setAttribute('visibility', 'visible');
+    } else {
+      happy.setAttribute('visibility', 'hidden');
+      eye.setAttribute('visibility', 'visible'); shine.setAttribute('visibility', 'visible');
+      const ecx = cx + pdx, ecy = 51 + pdy;
+      eye.setAttribute('cx', ecx.toFixed(2)); eye.setAttribute('cy', ecy.toFixed(2));
+      eye.setAttribute('rx', ew); eye.setAttribute('ry', Math.max(eh, 1.2).toFixed(2));
+      shine.setAttribute('cx', (ecx - ew * 0.44).toFixed(2));
+      shine.setAttribute('cy', (ecy - eh * 0.5).toFixed(2));
+      shine.setAttribute('r', (ew * 0.36).toFixed(2));
+    }
+  }
+
+  const lift = 3;
+  const base = 28;
+  let b1 = [23, base, 46, base], b2 = [54, base, 77, base];
+  if (emo === 'listening') { b1 = [23, base - lift, 46, base - lift]; b2 = [54, base - lift, 77, base - lift]; }
+  else if (emo === 'thinking') { b1 = [23, base - lift, 46, base - lift * 0.2]; b2 = [54, base - lift * 0.2, 77, base - lift]; }
+  else if (emo === 'sad') { b1 = [23, base + lift * 0.4, 46, base - lift * 0.5]; b2 = [54, base - lift * 0.5, 77, base + lift * 0.4]; }
+  else if (emo === 'happy') { b1 = [23, base - lift * 0.55, 46, base - lift * 0.55]; b2 = [54, base - lift * 0.55, 77, base - lift * 0.55]; }
+  F.browL.setAttribute('x1', b1[0]); F.browL.setAttribute('y1', b1[1]);
+  F.browL.setAttribute('x2', b1[2]); F.browL.setAttribute('y2', b1[3]);
+  F.browR.setAttribute('x1', b2[0]); F.browR.setAttribute('y1', b2[1]);
+  F.browR.setAttribute('x2', b2[2]); F.browR.setAttribute('y2', b2[3]);
+
+  if (emo === 'talking') {
+    F.mouthArc.setAttribute('visibility', 'hidden');
+    F.mouthOpen.setAttribute('visibility', 'visible');
+    const cycle = (Math.sin(faceT * 4.5) + 1.0) * 0.5;
+    const open = 0.3 + 0.7 * cycle;
+    F.mouthOpen.setAttribute('rx', 8.4);
+    F.mouthOpen.setAttribute('ry', (2 + open * 8.5).toFixed(2));
+  } else {
+    F.mouthOpen.setAttribute('visibility', 'hidden');
+    F.mouthArc.setAttribute('visibility', 'visible');
+    if (emo === 'happy' || emo === 'listening') F.mouthArc.setAttribute('d', 'M 31 68 Q 50 82 69 68');
+    else if (emo === 'sad') F.mouthArc.setAttribute('d', 'M 32 72 Q 50 58 68 72');
+    else F.mouthArc.setAttribute('d', 'M 35 68 Q 50 78 65 68');
+  }
+  requestAnimationFrame(faceFrame);
+}
+requestAnimationFrame(faceFrame);
+
+function addMsg(role, text) {
+  const name = role === 'user' ? 'You' : role === 'system' ? 'Notice' : document.getElementById('name').value || 'Nova';
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  el.innerHTML = `<span class="name">${name}</span><span class="copy" onclick="copyMsg(this)">[Copy]</span>
+    <div class="body"></div>`;
+  el.querySelector('.body').textContent = text;
+  chat.appendChild(el);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function copyMsg(el) {
+  const text = el.parentElement.querySelector('.body').textContent;
+  navigator.clipboard && navigator.clipboard.writeText(text);
+  setStatus('Copied to clipboard.');
+  setTimeout(() => setStatus(idleStatus()), 1200);
+}
+
+function idleStatus() {
+  return `Ready — say "Hey ${document.getElementById('name').value || 'Nova'}" to talk`;
+}
+
+function showTyping() {
+  removeTyping();
+  typingEl = document.createElement('div');
+  typingEl.className = 'msg assistant';
+  typingEl.innerHTML = `<span class="name">${document.getElementById('name').value || 'Nova'}</span>
+    <div class="typing">is typing<span id="dots"></span></div>`;
+  chat.appendChild(typingEl);
+  let n = 0;
+  const t = setInterval(() => {
+    n = (n + 1) % 4;
+    const d = document.getElementById('dots');
+    if (d) d.textContent = '.'.repeat(n);
+    chat.scrollTop = chat.scrollHeight;
+  }, 350);
+  timers.push(t);
+}
+function removeTyping() {
+  if (typingEl) { typingEl.remove(); typingEl = null; }
+}
+
+const mem = { name: '', facts: [] };
+function answerFor(q) {
+  const ql = q.toLowerCase();
+  let m;
+  if ((m = q.match(/^(?:please\s+)?(?:remember\s+(?:that\s+)?)?my name is (.+)$/i)) ||
+      (m = q.match(/^(?:please\s+)?(?:(?:you\s+)?can\s+)?call me (.+)$/i))) {
+    mem.name = m[1].trim();
+    return `Got it — I'll call you ${mem.name}.`;
+  }
+  if ((m = q.match(/^(?:please\s+)?remember\s+(?:that\s+)?(.+)$/i))) {
+    mem.facts.push(m[1].trim());
+    return `Okay, I'll remember that ${m[1].trim()}.`;
+  }
+  if (/^what(?:'s| is) my name\??$/i.test(q) || /^who am i\??$/i.test(q)) {
+    return mem.name ? `Your name is ${mem.name}.` : "You haven't told me your name yet. Say 'my name is' followed by your name and I'll remember it.";
+  }
+  if (/^what do you (remember|know about me)\??$/i.test(q)) {
+    const parts = [];
+    if (mem.name) parts.push(`your name is ${mem.name}`);
+    if (mem.facts.length) parts.push('I also remember: ' + mem.facts.join('; '));
+    return parts.length ? 'I remember that ' + parts.join(' and ') + '.'
+      : "I don't have any memories yet. Say 'remember that' followed by anything and I'll keep it.";
+  }
+  if (/^forget (everything|my name)\??$/i.test(q)) {
+    if (ql.includes('name')) { mem.name = ''; return "Okay, I forgot your name."; }
+    mem.name = ''; mem.facts = []; return "Okay, I forgot everything.";
+  }
+  if (ql.includes('help')) return "You can ask me anything, say 'search for' to look something up, 'open' plus an app name to launch a program, 'what time is it', 'clear chat', 'repeat that', or 'stop' to silence me. Tell me 'my name is' or 'remember that' and I'll keep it in memory — ask 'what do you remember' to hear it back. Just say 'Hey Nova' to start.";
+  if (ql.includes('time')) return "It's " + new Date().toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit'}) + ".";
+  if (ql.includes('date') || ql.includes('day')) return "Today is " + new Date().toLocaleDateString('en-US', {weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'}) + ".";
+  if (ql.startsWith('search for')) return "Here's what I found on DuckDuckGo about that (in the desktop app, real web results are fetched and given to Gemini).";
+  if (ql.startsWith('open')) return "Opening it — or: \"That app isn't on my allowed list.\" if it's not registered in Settings.";
+  return "This is a UI preview — in the real desktop app, Gemini 3.5 flash lite answers this out loud via gTTS.";
+}
+
+function runFlow(spokenText) {
+  timers.forEach(clearInterval); timers = [];
+  if (spokenText !== null) addMsg('user', spokenText);
+  setStatus('Thinking...');
+  showTyping();
+  timers.push(setTimeout(() => {
+    removeTyping();
+    const q = spokenText !== null ? spokenText : document.getElementById('input').value || 'hello nova';
+    addMsg('assistant', answerFor(q));
+    setStatus('Speaking...');
+    timers.push(setTimeout(() => setStatus(idleStatus()), 1400));
+  }, 1300));
+}
+
+function sendDemo() {
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  // Wake-phrase demo: "hey nova ..." behaves like the desktop wake flow
+  const wake = text.replace(/^\s*(?:please\s+)?(?:(?:hey(?:\s+there)?|ok(?:ay)?|hi|hello|yo)\s+)?nova\b[\s,.:!?]*/i, '');
+  runFlow(wake === text ? text : (wake || 'Yes? I\'m listening — go ahead.'));
+}
+
+function micDemo() {
+  timers.forEach(clearInterval); timers = [];
+  setStatus('Listening...');
+  const t = setTimeout(() => runFlow("nova what's the weather"), 1200);
+  timers.push(t);
+}
+
+function stopDemo() {
+  timers.forEach(clearInterval); timers = [];
+  removeTyping();
+  setStatus(idleStatus());
+}
+
+function clearChat() {
+  chat.innerHTML = '';
+  addMsg('system', 'Chat cleared — memory reset.');
+  setStatus('Chat cleared — memory reset.');
+  setTimeout(() => setStatus(idleStatus()), 1200);
+}
+
+function fillApp(el) {
+  const [name, path] = el.textContent.split(' — ');
+  document.getElementById('appName').value = name;
+  document.getElementById('appPath').value = path;
+}
+
+function addApp() {
+  const name = document.getElementById('appName').value.trim();
+  const path = document.getElementById('appPath').value.trim();
+  if (!name || !path) { setStatus('Enter both an app name and a file path.'); return; }
+  const row = document.createElement('div');
+  row.textContent = `${name} — ${path}`;
+  row.onclick = () => fillApp(row);
+  document.getElementById('apps').appendChild(row);
+  setStatus(`Added '${name}' to Allowed Apps.`);
+}
+
+function removeApp() {
+  const apps = document.getElementById('apps');
+  const rows = [...apps.children].filter(r => r.textContent.startsWith(document.getElementById('appName').value));
+  if (rows.length) { rows[rows.length - 1].remove(); setStatus('Removed from Allowed Apps.'); }
+  else setStatus('Select an app to remove.');
+}
+
+function saveSettings() {
+  setStatus('Settings saved.');
+  setTimeout(() => setStatus(idleStatus()), 1200);
+}
+</script>
+</body>
+</html>
