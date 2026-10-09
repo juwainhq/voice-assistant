@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Nova</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <svg viewBox="0 0 100 100" width="52" height="52" aria-hidden="true">
+      <g id="faceBob">
+        <circle cx="53" cy="51.8" r="42" fill="#8C8C8C"/>
+        <circle cx="50" cy="50" r="42" fill="#FAFAFA"/>
+        <ellipse id="blushL" cx="25.6" cy="67.6" rx="5.2" ry="3.6" fill="#8C8C8C" opacity="0.55"/>
+        <ellipse id="blushR" cx="74.4" cy="67.6" rx="5.2" ry="3.6" fill="#8C8C8C" opacity="0.55"/>
+        <line id="eyeL" x1="34.5" y1="43.4" x2="34.5" y2="60.6" stroke="#000" stroke-width="8.6" stroke-linecap="round"/>
+        <line id="eyeR" x1="65.5" y1="43.4" x2="65.5" y2="60.6" stroke="#000" stroke-width="8.6" stroke-linecap="round"/>
+      </g>
+    </svg>
+    <div class="titles">
+      <div class="title" id="titleName">Nova</div>
+      <div class="subtitle">voice assistant</div>
+    </div>
+    <div class="spacer"></div>
+    <span class="dot" id="statusDot"></span>
+    <button class="icon-btn" id="wakeBtn" title="Wake word listener">&#9789;</button>
+    <button class="icon-btn" id="gearBtn" title="Settings">&#9881;</button>
+  </header>
+
+  <main class="chat" id="chat"></main>
+
+  <footer>
+    <div class="input-row">
+      <input class="entry" id="entry" placeholder="Message Nova…" autocomplete="off">
+      <button class="btn mic" id="micBtn">Mic</button>
+      <button class="btn" id="sendBtn">Send</button>
+    </div>
+    <div class="status" id="status">Ready</div>
+  </footer>
+
+  <div class="sheet-backdrop hidden" id="sheetBackdrop">
+    <div class="sheet" role="dialog" aria-label="Settings">
+      <div class="sheet-head">
+        <div class="sheet-title">Settings</div>
+        <button class="icon-btn" id="closeSheet">&#10005;</button>
+      </div>
+
+      <label class="field-label" for="setKey">GEMINI API KEY</label>
+      <input class="field" id="setKey" type="password" placeholder="YOUR_GEMINI_API_KEY_HERE">
+      <div class="hint">Stored in config.py on the server PC.</div>
+
+      <label class="field-label" for="setName">ASSISTANT NAME</label>
+      <input class="field" id="setName" type="text">
+
+      <div class="field-label">VOICE SPEED</div>
+      <div class="radios" id="speedRadios">
+        <label><input type="radio" name="speed" value="slow"> Slow</label>
+        <label><input type="radio" name="speed" value="normal" checked> Normal</label>
+        <label><input type="radio" name="speed" value="fast"> Fast</label>
+      </div>
+
+      <div class="field-label">ALLOWED APPS</div>
+      <div class="apps-list" id="appsList"></div>
+      <div class="apps-row">
+        <input class="field" id="appName" placeholder="app name">
+        <input class="field" id="appPath" placeholder="file path">
+      </div>
+      <div class="apps-row">
+        <button class="btn" id="addApp">Add</button>
+        <button class="btn" id="removeApp">Remove</button>
+      </div>
+
+      <button class="btn primary" id="saveBtn">Save settings</button>
+      <button class="btn" id="clearBtn">Clear chat</button>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -496,7 +496,7 @@ def parse_memory_command(text: str) -> tuple[str, str] | None:
         return "forget", m.group("fact").strip(" .!?\"'")
 
     # "what's my name" / "who am i"
-    if re.match(r"^(?:what(?:'s| is| s) my name|who am i|do you know my name)\??$",
+    if re.match(r"^(?:what(?:'s|s| is) my name|who am i|do you know my name)\??$",
                 s, flags=re.IGNORECASE):
         return "recall_name", ""
 
