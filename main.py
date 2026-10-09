@@ -1,19 +1,23 @@
 """Nova — a desktop voice assistant built with tkinter.
 
 Layout:
+    - Full-width dark window (900x620): header bar, chat, input row.
+    - Header: avatar + assistant name on the left; a status dot and a gear
+      button (settings popup) on the right.
     - Chat window with the conversation history and a [Copy] link per message.
-    - Mic button to ask by voice (sounddevice + SpeechRecognition).
-    - Passive wake-word listener: say the assistant's name ("Nova") to activate.
-    - Text input box + Send button as fallback, Stop button to cut speech.
-    - Status line: "Listening...", "Thinking...", "Speaking...".
+    - Input row: text entry with Mic + Send buttons on the right. While the
+      assistant speaks the Mic button turns red — click it to stop.
+    - Status line below the input: "Listening...", "Thinking...", "Speaking...".
     - Typing indicator dots while Gemini is thinking.
-    - Settings panel: Gemini API key, assistant name, voice speed, Allowed Apps.
+    - Settings popup (gear button): Gemini API key, assistant name, voice
+      speed, Allowed Apps.
     - Closing the window minimizes to the system tray (pystray).
 
-The AI brain is Gemini (gemini-3.5-flash-lite). Voice output uses gTTS.
-Speech is played through sounddevice (so speed control and Stop work) with
-playsound as a fallback. Saying "search for ..." triggers a DuckDuckGo web
-search; saying "open [app]" launches an app from the Allowed Apps list.
+The AI brain is Gemini (gemini-3.5-flash-lite). Voice output uses gTTS with
+a pyttsx3 offline fallback when the network is unavailable. Speech is played
+through sounddevice (so speed control and Stop work) with playsound as a
+fallback. Saying "search for ..." triggers a DuckDuckGo web search; saying
+"open [app]" launches an app from the Allowed Apps list.
 """
 
 import json
@@ -42,6 +46,11 @@ except ImportError:  # pragma: no cover - optional dependency
     miniaudio = None
 
 try:
+    import pyttsx3  # offline TTS fallback when gTTS cannot reach the network
+except ImportError:  # pragma: no cover - optional dependency
+    pyttsx3 = None
+
+try:
     import pystray
     from PIL import Image, ImageDraw
     TRAY_AVAILABLE = True
@@ -60,6 +69,11 @@ PLACEHOLDER_KEY = "YOUR_GEMINI_API_KEY_HERE"
 NO_APP_REPLY = "That app isn't on my allowed list."
 SPEEDS = {0: "slow", 1: "normal", 2: "fast"}
 FAST_RATE = 1.35  # playback rate for the "fast" voice speed
+STOP_RED = "#FF4444"  # mic button background while speaking (click to stop)
+
+# Wake-word listener (its own always-on mic stream)
+WAKE_CHECK_SECONDS = 2.0  # how often the rolling wake window is transcribed
+WAKE_WINDOW_SECONDS = 2.5  # rolling audio window sent to speech recognition
 
 # Microphone recording settings
 SAMPLE_RATE = 16000  # samples per second
@@ -210,11 +224,32 @@ def _play_mp3(path: str, rate: float, cancel: threading.Event | None) -> None:
     playsound(path)  # fallback: cannot change speed or stop mid-sentence
 
 
+def _speak_offline(text: str, speed: str,
+                  cancel: threading.Event | None) -> None:
+    """Fallback speech with pyttsx3 when gTTS cannot reach the network."""
+    if pyttsx3 is None or not text or (cancel is not None and cancel.is_set()):
+        return
+    try:
+        engine = pyttsx3.init()  # a fresh engine per utterance (avoids stalls)
+        rate = engine.getProperty("rate")
+        if speed == "fast":
+            engine.setProperty("rate", rate * FAST_RATE)
+        elif speed == "slow":
+            engine.setProperty("rate", rate * 0.75)
+        engine.say(text)
+        engine.runAndWait()
+        engine.stop()
+    except Exception:  # noqa: BLE001 - speech output is optional
+        pass
+
+
 def speak(text: str, speed: str = "normal",
           cancel: threading.Event | None = None) -> None:
     """Speak text out loud: gTTS -> temp mp3 -> playback -> delete the temp file.
 
     "slow" uses gTTS slow mode; "fast" plays the audio at a faster rate.
+    gTTS needs internet — if it fails or times out after 3 seconds the text
+    is spoken locally with pyttsx3 instead.
     """
     if not text or (cancel is not None and cancel.is_set()):
         return
@@ -222,14 +257,14 @@ def speak(text: str, speed: str = "normal",
         mp3_path = tmp_file.name
     try:
         try:
-            tts = gTTS(text, slow=(speed == "slow"), timeout=10)
+            tts = gTTS(text, slow=(speed == "slow"), timeout=3)
         except TypeError:  # older gTTS without a timeout parameter
             tts = gTTS(text, slow=(speed == "slow"))
         tts.save(mp3_path)
         rate = FAST_RATE if speed == "fast" else 1.0
         _play_mp3(mp3_path, rate, cancel)
-    except Exception:  # noqa: BLE001 - speech output is optional
-        pass
+    except Exception:  # noqa: BLE001 - gTTS failed or timed out
+        _speak_offline(text, speed, cancel)
     finally:
         try:
             os.remove(mp3_path)  # delete the temp file after playing
@@ -502,11 +537,13 @@ def infer_emotion(status: str) -> str:
 
 
 class BubblyFace(tk.Canvas):
-    """A Grok-bot style pearl bubble head: calm, glossy white ball with big
-    eyes and a small expressive mouth. Idle = still and peaceful (eyes may
-    blink, pupils drift very slowly). Motion only comes in when the emotion
-    calls for it (listening perk, happy lift, thinking glance, talking mouth).
-    The whole ball does not bounce around.
+    """A 1:1 Grok Bot face: smooth pearl ball, twin capsule eyes, blush.
+
+    The classic Grok-bot look is a clean round head with two solid black
+    vertical capsule eyes and soft oval cheeks - no mouth, brows, glints or
+    shine line. Expressions live in the capsules themselves: they grow,
+    drift, tilt, squash to blink and chatter while talking. At rest the ball
+    only breathes - the whole ball does not bounce around.
     """
 
     FRAME_MS = 80  # animation frame period
@@ -523,22 +560,12 @@ class BubblyFace(tk.Canvas):
         self.shadow = self.create_oval(0, 0, 0, 0, fill=MUTED, outline="")
         self.head = self.create_oval(0, 0, 0, 0, fill=WHITE,
                                      outline=ENTRY_BORDER, width=1)
-        self.shine_arc = self.create_arc(0, 0, 0, 0, style=tk.ARC,
-                                         outline=MUTED, width=3)
-        self.shine_dot = self.create_oval(0, 0, 0, 0, fill=MUTED, outline="")
-        self.eye_l = self.create_oval(0, 0, 0, 0, fill=BLACK, outline="")
-        self.eye_r = self.create_oval(0, 0, 0, 0, fill=BLACK, outline="")
-        self.eye_l_happy = self.create_arc(0, 0, 0, 0, style=tk.ARC,
-                                           outline=BLACK, width=4)
-        self.eye_r_happy = self.create_arc(0, 0, 0, 0, style=tk.ARC,
-                                           outline=BLACK, width=4)
-        self.shine_l = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
-        self.shine_r = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
-        self.brow_l = self.create_line(0, 0, 0, 0, fill=BLACK, width=3)
-        self.brow_r = self.create_line(0, 0, 0, 0, fill=BLACK, width=3)
-        self.mouth_arc = self.create_arc(0, 0, 0, 0, style=tk.ARC,
-                                         outline=BLACK, width=3)
-        self.mouth_open = self.create_oval(0, 0, 0, 0, fill=BLACK, outline="")
+        self.blush_l = self.create_oval(0, 0, 0, 0, fill=MUTED, outline="")
+        self.blush_r = self.create_oval(0, 0, 0, 0, fill=MUTED, outline="")
+        self.eye_l = self.create_line(0, 0, 0, 0, fill=BLACK, width=3,
+                                      capstyle=tk.ROUND)
+        self.eye_r = self.create_line(0, 0, 0, 0, fill=BLACK, width=3,
+                                      capstyle=tk.ROUND)
 
         self.after(self.FRAME_MS, self._tick)
 
@@ -565,8 +592,7 @@ class BubblyFace(tk.Canvas):
         t = self._t
         emo = self.emotion
 
-        # Calm pearl head: a very slow, tiny breath; perfectly still when
-        # talking so the mouth carries all of the motion.
+        # Calm pearl head: a very slow, tiny breath; never bounces.
         cx = s / 2
         cy = s / 2
         rx = s * 0.42
@@ -582,121 +608,55 @@ class BubblyFace(tk.Canvas):
                     cx + off + rx, cy + off * 0.6 + ry)
         self.coords(self.head, cx - rx, cy - ry, cx + rx, cy + ry)
 
-        # Bubble shine: curved highlight stroke + a dot near the top-left
-        self.coords(self.shine_arc, cx - rx * 0.85, cy - ry * 0.92,
-                    cx - rx * 0.18, cy - ry * 0.28)
-        self.itemconfig(self.shine_arc, start=185, extent=72)
-        dr = s * 0.022
-        self.coords(self.shine_dot, cx - rx * 0.06 - dr, cy - ry * 0.82 - dr,
-                    cx - rx * 0.06 + dr, cy - ry * 0.82 + dr)
+        # Soft oval blush (part of the Grok-bot look)
+        boost = 1.15 if emo == "happy" else 1.0
+        brx, bry = s * 0.052 * boost, s * 0.036 * boost
+        for item, side in ((self.blush_l, -1), (self.blush_r, 1)):
+            bx = cx + side * rx * 0.58
+            by = cy + ry * 0.42
+            self.coords(item, bx - brx, by - bry, bx + brx, by + bry)
 
-        # Big glossy eyes - solid dark ovals with a single white glint
-        blinking = self._blink_left > 0 and emo not in ("happy", "talking")
-        happy_eyes = emo in ("happy", "talking")
+        # Twin capsule eyes - the whole expression lives in these.
+        blinking = self._blink_left > 0
         eye_dx = s * 0.155
-        eye_cy = cy + s * 0.01
+        eye_cy = cy + s * 0.02
+        w = s * 0.086  # capsule stroke width (a capsule is 3w tall in total)
+        h = w          # half-length of the straight part
+        shear = 0.0    # horizontal lean of the eye tips
+        dx = dy = 0.0
+
         if emo == "listening":
-            ew = s * 0.115
-            eh = s * 0.15
-        else:
-            ew = s * 0.098
-            eh = s * 0.128
+            w *= 1.18
+            h *= 1.24
+            dy = -s * 0.018
+        elif emo == "thinking":
+            dx = math.sin(t * 0.9) * s * 0.018 - s * 0.012
+            dy = -s * 0.016
+        elif emo == "sad":
+            w *= 0.86
+            h *= 0.9
+            dy = s * 0.018
+            shear = -s * 0.014  # tips lean inward = worried
+        elif emo == "happy":
+            w *= 1.32
+            h *= 0.78
+            dy = -s * 0.008
+            shear = s * 0.02  # tips lean outward = the happy look
+        elif emo == "talking":
+            # No mouth in this style: the capsules chatter with the speech.
+            h *= 0.85 + 0.4 * abs(math.sin(t * 9.0))
+        else:  # idle: the eyes drift very slowly
+            dx = math.sin(t * 0.5) * s * 0.006
+
         if blinking:
-            eh = 1.6
+            h = w * 0.12
 
-        if emo == "thinking":
-            pupil_dx = math.sin(t * 0.9) * s * 0.018
-            pupil_dy = -s * 0.016
-        elif emo == "sad":
-            pupil_dx = 0.0
-            pupil_dy = s * 0.016
-        elif emo == "listening":
-            pupil_dx = 0.0
-            pupil_dy = 0.0
-        else:
-            pupil_dx = math.sin(t * 0.5) * s * 0.006  # very slow drift
-            pupil_dy = 0.0
-
-        for side, eye, happy, shine in (
-            (-1, self.eye_l, self.eye_l_happy, self.shine_l),
-            (1, self.eye_r, self.eye_r_happy, self.shine_r),
-        ):
-            ex = cx + side * eye_dx
-            if happy_eyes:
-                self.itemconfig(eye, state="hidden")
-                self.itemconfig(shine, state="hidden")
-                self.itemconfig(happy, state="normal", start=180, extent=180)
-                self.coords(happy, ex - ew * 1.55, eye_cy - eh * 1.18,
-                            ex + ew * 1.55, eye_cy + eh * 1.18)
-            else:
-                self.itemconfig(happy, state="hidden")
-                self.itemconfig(eye, state="normal")
-                self.itemconfig(shine, state="normal")
-                ecx = ex + pupil_dx
-                ecy = eye_cy + pupil_dy
-                self.coords(eye, ecx - ew, ecy - eh, ecx + ew, ecy + eh)
-                sw = ew * 0.36
-                self.coords(shine, ecx - ew * 0.44 - sw, ecy - eh * 0.5 - sw,
-                            ecx - ew * 0.44 + sw, ecy - eh * 0.5 + sw)
-
-        # Eyebrows carry most of the emotion
-        brow_w = ew * 2.35
-        brow_y = eye_cy - eh * 1.78
-        lift = s * 0.03
-        for side, brow in ((-1, self.brow_l), (1, self.brow_r)):
-            bx = cx + side * eye_dx
-            x1 = bx - brow_w / 2
-            x2 = bx + brow_w / 2
-            y1 = y2 = brow_y
-            if emo == "listening":
-                y1 = y2 = brow_y - lift
-            elif emo == "thinking":
-                if side == -1:
-                    y1 = brow_y - lift
-                    y2 = brow_y - lift * 0.2
-                else:
-                    y1 = brow_y - lift * 0.2
-                    y2 = brow_y - lift
-            elif emo == "sad":
-                if side == -1:
-                    y1 = brow_y + lift * 0.4
-                    y2 = brow_y - lift * 0.5
-                else:
-                    y1 = brow_y - lift * 0.5
-                    y2 = brow_y + lift * 0.4
-            elif emo == "happy":
-                y1 = y2 = brow_y - lift * 0.55
-            self.coords(brow, x1, y1, x2, y2)
-
-        # Mouth: an oval that opens/closes while talking, an arc otherwise
-        mouth_cy = cy + ry * 0.46
-        if emo == "talking":
-            self.itemconfig(self.mouth_arc, state="hidden")
-            self.itemconfig(self.mouth_open, state="normal")
-            cycle = (math.sin(t * 4.5) + 1.0) * 0.5
-            open_amt = 0.3 + 0.7 * cycle
-            mw = rx * 0.2
-            mh = s * 0.02 + open_amt * s * 0.085
-            self.coords(self.mouth_open, cx - mw, mouth_cy - mh,
-                        cx + mw, mouth_cy + mh)
-            return
-
-        self.itemconfig(self.mouth_open, state="hidden")
-        self.itemconfig(self.mouth_arc, state="normal")
-        if emo in ("happy", "listening"):
-            mw = rx * 0.5
-            mh = ry * 0.32
-            self.itemconfig(self.mouth_arc, start=0, extent=180)  # big smile
-        elif emo == "sad":
-            mw = rx * 0.44
-            mh = ry * 0.28
-            self.itemconfig(self.mouth_arc, start=180, extent=180)  # frown
-        else:  # idle / thinking: small gentle smile
-            mw = rx * 0.4
-            mh = ry * 0.24
-            self.itemconfig(self.mouth_arc, start=20, extent=140)
-        self.coords(self.mouth_arc, cx - mw, mouth_cy - mh,
-                    cx + mw, mouth_cy + mh)
+        for side, eye in ((-1, self.eye_l), (1, self.eye_r)):
+            ex = cx + side * eye_dx + dx
+            ey = eye_cy + dy
+            tip = -side * shear  # positive tip leans the top of the eye outward
+            self.coords(eye, ex - tip, ey - h, ex + tip, ey + h)
+            self.itemconfig(eye, width=w)
 
 
 # ----------------------------------------------------------------------------
@@ -719,7 +679,7 @@ class VoiceAssistantApp:
         self.tray_icon = None
 
         self.speech_lock = threading.Lock()
-        self._audio_lock = threading.Lock()  # one mic stream at a time
+        self._audio_lock = threading.Lock()  # one main mic stream at a time
         self._busy_event = threading.Event()  # set while listening/thinking
         self._speaking_event = threading.Event()  # set while TTS plays
         self._speech_cancel = threading.Event()  # set to stop playback
@@ -733,10 +693,12 @@ class VoiceAssistantApp:
         self._typing_start = "1.0"
         self._typing_ticks = 0
         self._typing_job = None
+        self._settings_win = None
+        self._dot_blink_job = None
+        self._dot_color = MUTED
 
         root.title(f"{self.assistant_name} — Voice Assistant")
-        root.geometry("1080x740")
-        root.minsize(860, 560)
+        root.geometry("900x620")
         root.configure(bg=BG)
         root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
 
@@ -749,14 +711,11 @@ class VoiceAssistantApp:
     # ----- UI construction ---------------------------------------------------
 
     def _build_ui(self) -> None:
-        main = tk.Frame(self.root, bg=BG)
-        main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Header
-        header = tk.Frame(main, bg=BG)
-        header.pack(fill=tk.X, padx=20, pady=(10, 6))
-        self.face = BubblyFace(header, size=92)
-        self.face.pack(side=tk.LEFT, padx=(0, 14))
+        # Header: avatar + name on the left; status dot + gear on the right.
+        header = tk.Frame(self.root, bg=BG)
+        header.pack(fill=tk.X, padx=18, pady=(12, 8))
+        self.face = BubblyFace(header, size=72)
+        self.face.pack(side=tk.LEFT, padx=(0, 12))
         title_box = tk.Frame(header, bg=BG)
         title_box.pack(side=tk.LEFT)
         self.title_label = tk.Label(
@@ -767,21 +726,27 @@ class VoiceAssistantApp:
         tk.Label(
             title_box, text="voice assistant", font=FONT, bg=BG, fg=MUTED,
         ).pack(anchor="w")
-        self.clear_button = tk.Button(
-            header, text="Clear chat", font=FONT_BOLD, command=self._clear_chat,
-            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
-            relief=tk.FLAT, padx=12, pady=6, cursor="hand2", borderwidth=0,
-        )
-        self.clear_button.pack(side=tk.RIGHT, pady=(4, 0))
 
-        # Chat window (conversation history)
-        chat_frame = tk.Frame(main, bg=CARD, highlightthickness=1,
-                              highlightbackground=ENTRY_BORDER)
-        chat_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=8)
+        self.gear_button = tk.Button(
+            header, text="\u2699", font=("Segoe UI", 14),
+            command=self._open_settings,
+            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
+            relief=tk.FLAT, padx=10, pady=2, cursor="hand2", borderwidth=0,
+        )
+        self.gear_button.pack(side=tk.RIGHT)
+        self.status_dot = tk.Canvas(header, width=12, height=12, bg=BG,
+                                    highlightthickness=0, borderwidth=0)
+        self.status_dot.pack(side=tk.RIGHT, padx=(0, 10))
+        self._dot = self.status_dot.create_oval(1, 1, 11, 11,
+                                                fill=MUTED, outline="")
+
+        # Chat window (conversation history) - full width, no border.
+        chat_frame = tk.Frame(self.root, bg=CARD)
+        chat_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(4, 6))
         self.chat_view = tk.Text(
             chat_frame, bg=CARD, fg=TEXT, font=FONT, relief=tk.FLAT,
-            wrap=tk.WORD, state=tk.DISABLED, padx=16, pady=14, spacing3=4,
-            cursor="arrow", borderwidth=0,
+            wrap=tk.WORD, state=tk.DISABLED, padx=18, pady=14, spacing3=6,
+            cursor="arrow", borderwidth=0, highlightthickness=0,
         )
         scrollbar = tk.Scrollbar(chat_frame, command=self.chat_view.yview,
                                  width=10, relief=tk.FLAT, bg=ENTRY_BORDER,
@@ -789,159 +754,210 @@ class VoiceAssistantApp:
         self.chat_view.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.chat_view.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.chat_view.tag_configure("user_name", foreground=TEXT, font=FONT_BOLD)
-        self.chat_view.tag_configure("assistant_name", foreground=TEXT, font=FONT_BOLD)
-        self.chat_view.tag_configure("system_name", foreground=MUTED, font=FONT_BOLD)
-        self.chat_view.tag_configure("user_text", foreground=TEXT, lmargin1=10, lmargin2=10)
-        self.chat_view.tag_configure("assistant_text", foreground=SOFT,
-                                     lmargin1=10, lmargin2=10)
+        self.chat_view.tag_configure("user_name", foreground=TEXT,
+                                     font=FONT_BOLD, justify=tk.RIGHT)
+        self.chat_view.tag_configure("assistant_name", foreground=MUTED,
+                                     font=FONT_BOLD, justify=tk.LEFT)
+        self.chat_view.tag_configure("system_name", foreground=MUTED,
+                                     font=FONT_BOLD)
+        self.chat_view.tag_configure("user_text", foreground=TEXT,
+                                     justify=tk.RIGHT,
+                                     lmargin1=60, lmargin2=60)
+        self.chat_view.tag_configure("assistant_text", foreground=MUTED,
+                                     justify=tk.LEFT,
+                                     rmargin1=60, rmargin2=60)
         self.chat_view.tag_configure("system_text", foreground=MUTED,
-                                     lmargin1=10, lmargin2=10)
+                                     lmargin1=60, lmargin2=60,
+                                     rmargin1=60, rmargin2=60)
         self.chat_view.tag_configure("typing_line", foreground=MUTED,
                                      font=("Segoe UI", 10, "italic"))
         self.chat_view.tag_configure("copy_link", foreground=WHITE,
                                      font=("Segoe UI", 8, "underline"))
 
-        # Status line
-        bottom = tk.Frame(main, bg=BG)
-        bottom.pack(fill=tk.X, padx=16, pady=(2, 14))
-        self.status_label = tk.Label(
-            bottom, text="Ready", font=("Segoe UI", 9), bg=BG, fg=MUTED, anchor="w",
-        )
-        self.status_label.pack(fill=tk.X, pady=(0, 6))
-
-        # Input row: mic, stop, text input box (fallback), send
+        # Input row: entry full width, Mic + Send buttons on the right.
+        bottom = tk.Frame(self.root, bg=BG)
+        bottom.pack(fill=tk.X, padx=14, pady=(2, 12))
         input_row = tk.Frame(bottom, bg=BG)
         input_row.pack(fill=tk.X)
-        self.mic_button = tk.Button(
-            input_row, text="Mic", font=FONT_BOLD, command=self.on_mic,
-            bg=WHITE, fg=BLACK, activebackground=WHITE,
-            activeforeground=BLACK, relief=tk.FLAT, padx=18, pady=8,
-            cursor="hand2", borderwidth=0,
-        )
-        self.mic_button.pack(side=tk.LEFT, padx=(0, 8))
-        self.stop_button = tk.Button(
-            input_row, text="Stop", font=FONT_BOLD, command=self._stop_speaking,
-            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
-            relief=tk.FLAT, padx=14, pady=8, cursor="hand2", borderwidth=0,
-        )
-        self.stop_button.pack(side=tk.LEFT, padx=(0, 10))
-        self.entry = tk.Entry(
-            input_row, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT, font=FONT,
-            relief=tk.FLAT, highlightthickness=1, highlightbackground=ENTRY_BORDER,
-            highlightcolor=WHITE,
-        )
-        self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8)
-        self.entry.bind("<Return>", lambda _event: self.on_send())
         self.send_button = tk.Button(
             input_row, text="Send", font=FONT_BOLD, command=self.on_send,
-            bg=GRAY, fg=TEXT, activebackground=WHITE,
-            activeforeground=BLACK, relief=tk.FLAT, padx=18, pady=8,
-            cursor="hand2", borderwidth=0,
+            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
+            relief=tk.FLAT, padx=18, pady=8, cursor="hand2", borderwidth=0,
         )
-        self.send_button.pack(side=tk.LEFT, padx=(10, 0))
+        self.send_button.pack(side=tk.RIGHT, padx=(8, 0))
+        self.mic_button = tk.Button(
+            input_row, text="Mic", font=FONT_BOLD, command=self.on_mic,
+            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
+            relief=tk.FLAT, padx=18, pady=8, cursor="hand2", borderwidth=0,
+        )
+        self.mic_button.pack(side=tk.RIGHT)
+        self.entry = tk.Entry(
+            input_row, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT, font=FONT,
+            relief=tk.FLAT, highlightthickness=1,
+            highlightbackground=ENTRY_BORDER, highlightcolor=WHITE,
+            borderwidth=0,
+        )
+        self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8,
+                        padx=(0, 8))
+        self.entry.bind("<Return>", lambda _event: self.on_send())
 
-        # Settings panel (scrollable)
-        settings = tk.Frame(self.root, bg=PANEL, width=300)
-        settings.pack(side=tk.RIGHT, fill=tk.Y)
-        settings.pack_propagate(False)
-        canvas = tk.Canvas(settings, bg=PANEL, highlightthickness=0, borderwidth=0)
-        settings_scroll = tk.Scrollbar(settings, command=canvas.yview, width=10,
-                                       relief=tk.FLAT, bg=ENTRY_BORDER,
-                                       activebackground=MUTED, troughcolor=PANEL)
-        inner = tk.Frame(canvas, bg=PANEL)
-        inner.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        # Tiny status line below the input.
+        self.status_label = tk.Label(
+            bottom, text="Ready", font=("Segoe UI", 8), bg=BG, fg=MUTED,
+            anchor="w",
         )
-        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=settings_scroll.set)
-        settings_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        canvas.bind(
-            "<Configure>",
-            lambda e: canvas.itemconfigure(window_id, width=e.width),
-        )
+        self.status_label.pack(fill=tk.X, pady=(6, 0))
+
+    def _open_settings(self) -> None:
+        """Open the settings popup (the gear button in the header)."""
+        if self._settings_win is not None and self._settings_win.winfo_exists():
+            self._settings_win.lift()
+            self._settings_win.focus_force()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Settings")
+        win.configure(bg=BG)
+        win.geometry("440x620")
+        win.transient(self.root)
+        self._settings_win = win
+
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
+        tk.Label(body, text="Settings", font=FONT_SECTION,
+                 bg=BG, fg=TEXT).pack(anchor="w")
 
         def _label(text: str) -> None:
-            tk.Label(inner, text=text, font=FONT_SMALL,
-                     bg=PANEL, fg=MUTED).pack(anchor="w", padx=18, pady=(10, 0))
+            tk.Label(body, text=text, font=FONT_SMALL,
+                     bg=BG, fg=MUTED).pack(anchor="w", pady=(12, 0))
 
         def _entry(show: str = "") -> tk.Entry:
             widget = tk.Entry(
-                inner, show=show, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
+                body, show=show, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
                 font=FONT, relief=tk.FLAT, highlightthickness=1,
                 highlightbackground=ENTRY_BORDER, highlightcolor=WHITE,
+                borderwidth=0,
             )
-            widget.pack(fill=tk.X, padx=18, pady=(4, 0), ipady=6)
+            widget.pack(fill=tk.X, pady=(4, 0), ipady=6)
             return widget
 
-        tk.Label(inner, text="Settings", font=FONT_SECTION,
-                 bg=PANEL, fg=TEXT).pack(anchor="w", padx=18, pady=(20, 4))
         _label("ASSISTANT NAME")
         self.name_entry = _entry()
         self.name_entry.insert(0, self.assistant_name)
+
         _label("GEMINI API KEY")
-        self.key_entry = _entry(show="•")
+        self.key_entry = _entry(show="\u2022")
         if self.api_key and self.api_key != PLACEHOLDER_KEY:
             self.key_entry.insert(0, self.api_key)
-        tk.Label(inner, text="Stored in config.py", font=("Segoe UI", 8),
-                 bg=PANEL, fg=MUTED).pack(anchor="w", padx=18)
+        tk.Label(body, text="Stored in config.py", font=("Segoe UI", 8),
+                 bg=BG, fg=MUTED).pack(anchor="w")
 
-        # Voice speed slider (slow / normal / fast)
         _label("VOICE SPEED")
-        self.speed_scale = tk.Scale(
-            inner, from_=0, to=2, resolution=1, orient=tk.HORIZONTAL,
-            showvalue=False, bg=PANEL, fg=TEXT, highlightthickness=0,
-            troughcolor=ENTRY_BG, activebackground=WHITE, sliderrelief=tk.FLAT,
-            command=self._on_speed_change,
-        )
-        self.speed_scale.set(1)
-        self.speed_scale.pack(fill=tk.X, padx=14, pady=(2, 0))
-        speed_labels = tk.Frame(inner, bg=PANEL)
-        speed_labels.pack(fill=tk.X, padx=18)
-        for text, side in (("Slow", tk.LEFT), ("Normal", tk.LEFT), ("Fast", tk.RIGHT)):
-            tk.Label(speed_labels, text=text, font=("Segoe UI", 8),
-                     bg=PANEL, fg=MUTED).pack(side=side, expand=True)
+        self._speed_var = tk.StringVar(value=self._speed)
+        speeds = tk.Frame(body, bg=BG)
+        speeds.pack(fill=tk.X, pady=(4, 0))
+        for text, value in (("Slow", "slow"), ("Normal", "normal"),
+                            ("Fast", "fast")):
+            tk.Radiobutton(
+                speeds, text=text, value=value, variable=self._speed_var,
+                command=self._on_speed_change, bg=BG, fg=TEXT,
+                selectcolor=GRAY, activebackground=BG,
+                activeforeground=WHITE, highlightthickness=0, borderwidth=0,
+                font=FONT,
+            ).pack(side=tk.LEFT, expand=True, anchor="w")
 
-        # Allowed Apps
         _label("ALLOWED APPS")
         self.apps_list = tk.Listbox(
-            inner, bg=ENTRY_BG, fg=TEXT, font=("Segoe UI", 9), relief=tk.FLAT,
+            body, bg=ENTRY_BG, fg=TEXT, font=("Segoe UI", 9), relief=tk.FLAT,
             highlightthickness=1, highlightbackground=ENTRY_BORDER,
             selectbackground=WHITE, selectforeground=BLACK, height=5,
             activestyle="none", borderwidth=0,
         )
-        self.apps_list.pack(fill=tk.X, padx=18, pady=(4, 0))
+        self.apps_list.pack(fill=tk.X, pady=(4, 0))
         self.apps_list.bind("<<ListboxSelect>>", self._on_app_select)
         self._refresh_apps_list()
         self.app_name_entry = _entry()
         self.app_name_entry.insert(0, "app name")
         self.app_path_entry = _entry()
         self.app_path_entry.insert(0, "file path")
-        apps_buttons = tk.Frame(inner, bg=PANEL)
-        apps_buttons.pack(fill=tk.X, padx=18, pady=(8, 0))
+        apps_buttons = tk.Frame(body, bg=BG)
+        apps_buttons.pack(fill=tk.X, pady=(8, 0))
         self.add_app_button = tk.Button(
             apps_buttons, text="Add", font=FONT_BOLD, command=self._add_app,
-            bg=GRAY, fg=TEXT, activebackground=WHITE,
-            activeforeground=BLACK, relief=tk.FLAT, pady=6, cursor="hand2",
-            borderwidth=0,
-        )
-        self.add_app_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        self.remove_app_button = tk.Button(
-            apps_buttons, text="Remove", font=FONT_BOLD, command=self._remove_app,
             bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
             relief=tk.FLAT, pady=6, cursor="hand2", borderwidth=0,
         )
-        self.remove_app_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
+        self.add_app_button.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                 padx=(0, 6))
+        self.remove_app_button = tk.Button(
+            apps_buttons, text="Remove", font=FONT_BOLD,
+            command=self._remove_app,
+            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
+            relief=tk.FLAT, pady=6, cursor="hand2", borderwidth=0,
+        )
+        self.remove_app_button.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                    padx=(6, 0))
 
         save_button = tk.Button(
-            inner, text="Save settings", font=FONT_BOLD, command=self.save_settings,
-            bg=GRAY, fg=TEXT, activebackground=WHITE,
+            body, text="Save settings", font=FONT_BOLD,
+            command=self.save_settings,
+            bg=WHITE, fg=BLACK, activebackground=WHITE,
             activeforeground=BLACK, relief=tk.FLAT, pady=8, cursor="hand2",
             borderwidth=0,
         )
-        save_button.pack(fill=tk.X, padx=18, pady=18)
+        save_button.pack(fill=tk.X, pady=(16, 0))
+        clear_button = tk.Button(
+            body, text="Clear chat", font=FONT_BOLD, command=self._clear_chat,
+            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
+            relief=tk.FLAT, pady=8, cursor="hand2", borderwidth=0,
+        )
+        clear_button.pack(fill=tk.X, pady=(8, 0))
+
+    def _set_mic_speaking(self, speaking: bool) -> None:
+        """Mic button doubles as Stop: red while the assistant speaks."""
+
+        def apply() -> None:
+            if speaking:
+                self.mic_button.config(
+                    text="Stop", bg=STOP_RED, fg=WHITE, state=tk.NORMAL,
+                    activebackground=STOP_RED, activeforeground=WHITE,
+                )
+            else:
+                self.mic_button.config(
+                    text="Mic", bg=GRAY, fg=TEXT,
+                    activebackground=WHITE, activeforeground=BLACK,
+                )
+
+        self.root.after(0, apply)
+
+    def _set_dot(self, emotion: str) -> None:
+        """Header status dot: gray=idle, white=listening, blinking=speaking."""
+        if self._dot_blink_job is not None:
+            try:
+                self.root.after_cancel(self._dot_blink_job)
+            except Exception:  # noqa: BLE001 - job may already have run
+                pass
+            self._dot_blink_job = None
+        if emotion == "listening":
+            self._dot_color = WHITE
+            self.status_dot.itemconfig(self._dot, fill=WHITE)
+        elif emotion == "talking":
+            self._dot_color = WHITE
+            self.status_dot.itemconfig(self._dot, fill=WHITE)
+            self._dot_blink_job = self.root.after(400, self._blink_dot)
+        elif emotion == "thinking":
+            self._dot_color = MUTED
+            self.status_dot.itemconfig(self._dot, fill=MUTED)
+            self._dot_blink_job = self.root.after(500, self._blink_dot)
+        else:
+            self._dot_color = MUTED
+            self.status_dot.itemconfig(self._dot, fill=MUTED)
+
+    def _blink_dot(self) -> None:
+        current = self.status_dot.itemcget(self._dot, "fill")
+        self.status_dot.itemconfig(
+            self._dot, fill=BG if current != BG else self._dot_color,
+        )
+        self._dot_blink_job = self.root.after(400, self._blink_dot)
 
     # ----- Gemini -----------------------------------------------------------
 
@@ -983,7 +999,9 @@ class VoiceAssistantApp:
     def _set_status(self, text: str) -> None:
         def apply() -> None:
             self.status_label.config(text=text, fg=MUTED)
-            self.face.set_emotion(infer_emotion(text))
+            emotion = infer_emotion(text)
+            self.face.set_emotion(emotion)
+            self._set_dot(emotion)
 
         self.root.after(0, apply)
 
@@ -1029,9 +1047,10 @@ class VoiceAssistantApp:
 
     def _set_busy(self, busy: bool) -> None:
         def apply() -> None:
-            state = tk.DISABLED if busy else tk.NORMAL
-            self.mic_button.config(state=state)
-            self.send_button.config(state=state)
+            self.send_button.config(state=tk.DISABLED if busy else tk.NORMAL)
+            if not self._speaking_event.is_set():
+                self.mic_button.config(
+                    state=tk.DISABLED if busy else tk.NORMAL)
 
         self.root.after(0, apply)
 
@@ -1092,10 +1111,14 @@ class VoiceAssistantApp:
         threading.Thread(target=self._ask_worker, args=(question,), daemon=True).start()
 
     def on_mic(self) -> None:
+        """Mic button: start listening, or stop speech while speaking."""
+        if self._speaking_event.is_set():
+            self._stop_speaking()
+            return
         threading.Thread(target=self._listen_worker, daemon=True).start()
 
-    def _on_speed_change(self, value: str) -> None:
-        self._speed = SPEEDS.get(int(float(value)), "normal")
+    def _on_speed_change(self) -> None:
+        self._speed = self._speed_var.get()
 
     def _stop_speaking(self) -> None:
         self._speech_cancel.set()
@@ -1104,6 +1127,7 @@ class VoiceAssistantApp:
         except Exception:  # noqa: BLE001 - no active stream
             pass
         self._speaking_event.clear()
+        self._set_mic_speaking(False)
         self._set_idle_status()
 
     def _clear_chat(self) -> None:
@@ -1124,10 +1148,15 @@ class VoiceAssistantApp:
         self.title_label.config(text=self.assistant_name)
         self.root.title(f"{self.assistant_name} — Voice Assistant")
         self._set_status("Settings saved.")
+        if self._settings_win is not None and self._settings_win.winfo_exists():
+            self._settings_win.destroy()
+        self._settings_win = None
 
     # ----- Allowed Apps -------------------------------------------------------
 
     def _refresh_apps_list(self) -> None:
+        if not hasattr(self, "apps_list") or not self.apps_list.winfo_exists():
+            return
         self.apps_list.delete(0, tk.END)
         for name in sorted(self.allowed_apps):
             self.apps_list.insert(tk.END, name)
@@ -1231,85 +1260,119 @@ class VoiceAssistantApp:
         threading.Thread(target=self._speak, args=(greeting,), daemon=True).start()
 
     def _speak(self, text: str) -> None:
-        """Speak a line at the selected speed; cancellable via the Stop button."""
+        """Speak a line at the selected speed; cancel via the red Mic button."""
         cancel = threading.Event()
         self._speech_cancel = cancel
         self._speaking_event.set()
         self._set_status("Speaking...")
+        self._set_mic_speaking(True)
         with self.speech_lock:
             speak(text, self._speed, cancel)
         self._speaking_event.clear()
+        self._set_mic_speaking(False)
         self._set_idle_status()
 
     def _wake_word_worker(self) -> None:
-        """Passively listen for the wake phrase and activate on a match.
+        """Always-on wake-word listener on its OWN lightweight mic stream.
 
-        Wake phrases: "Hey Nova", "Nova", "Nova I have a question", ...
-        The loop must never die — every error is caught and retried.
+        It never uses record_question() or the main mic lock: it runs an
+        independent sounddevice.InputStream, transcribes a rolling window of
+        audio, and activates when the text contains the assistant's name.
+        After every activation it restarts itself, and the loop never dies.
         """
-        unclear = 0
         while self._running:
             try:
+                self._wake_listen_once()
+            except Exception as error:  # noqa: BLE001 - must never die
+                print(f"[wake listener] {error}")
+                time.sleep(1.0)
+
+    def _wake_listen_once(self) -> None:
+        """One wake-listening session on an independent input stream."""
+        window: list[np.ndarray] = []
+        max_chunks = max(int(WAKE_WINDOW_SECONDS / CHUNK_SECONDS), 2)
+        last_check = time.monotonic()
+        unclear = 0
+
+        def callback(indata, frames, time_info, status):
+            mono = indata.mean(axis=1) if indata.ndim > 1 else indata
+            window.append(mono.copy())
+            if len(window) > max_chunks:
+                del window[: len(window) - max_chunks]
+
+        stream, rate = _open_input_stream(callback)
+        with stream:
+            while self._running:
+                time.sleep(CHUNK_SECONDS)
                 if self._busy_event.is_set() or self._speaking_event.is_set():
-                    time.sleep(0.2)
                     continue
-                with self._audio_lock:
-                    audio = record_question()
-                if audio is None or self._busy_event.is_set() or self._speaking_event.is_set():
+                now = time.monotonic()
+                if now - last_check < WAKE_CHECK_SECONDS:
                     continue
-                text = transcribe(audio)
+                last_check = now
+                if not window:
+                    continue
+                audio_np = np.concatenate(window, axis=0)
+                # Lightweight gate: only spend a transcription when the
+                # window actually contains sound.
+                rms = (float(np.sqrt(np.mean(audio_np ** 2)))
+                       if audio_np.size else 0.0)
+                if rms < SILENCE_THRESHOLD:
+                    continue
+                pcm = (np.clip(audio_np, -1.0, 1.0) * 32767
+                       ).astype(np.int16).tobytes()
+                text = transcribe(sr.AudioData(pcm, rate, 2))
                 if not text:
                     unclear += 1
                     if unclear >= 5:
                         unclear = 0
                         self._set_status(
-                            "Wake listener is running but can't understand audio — "
-                            "check the mic and internet connection."
+                            "Wake listener is running but can't understand "
+                            "audio — check the mic and internet connection."
                         )
                     continue
                 unclear = 0
-                question = extract_wake_question(text, self.assistant_name)
-                if question is None:
+                if not re.search(rf"\b{re.escape(self.assistant_name)}\b",
+                                 text, re.IGNORECASE):
                     continue
-                # Wake phrase confirmed: show the window, beep, then act.
+                # Wake phrase confirmed: show the window, beep, then talk.
                 self.root.after(0, self._restore_window)
                 play_tone(880, 0.12)
-                if question:
-                    self._append_message("user", question)
-                    self._ask_worker(question)
-                else:
-                    self._listen_worker()  # just the wake phrase -> hear the question
-            except Exception as error:  # noqa: BLE001 - the listener must never die
-                print(f"[wake listener] {error}")
-                time.sleep(1.0)
+                question = extract_wake_question(text, self.assistant_name) or ""
+                threading.Thread(target=self._listen_worker,
+                                 args=(question,), daemon=True).start()
+                return  # restart the outer loop after every activation
 
-    def _listen_worker(self) -> None:
+    def _listen_worker(self, question: str | None = None) -> None:
+        """Record (or take) one question and answer it."""
         self._busy_event.set()
         self._set_busy(True)
-        self._set_status("Listening...")
-        with self._audio_lock:
-            try:
-                audio = record_question()
-            except Exception as error:  # noqa: BLE001 - mic problems fall back to typing
-                self._append_message("system", f"Microphone failed: {error}. "
-                                               "Type your message instead.")
-                self._set_status("Mic failed — type instead")
+        if not question:
+            self._set_status("Listening...")
+            with self._audio_lock:
+                try:
+                    audio = record_question()
+                except Exception as error:  # noqa: BLE001 - fall back to typing
+                    self._append_message("system", f"Microphone failed: {error}. "
+                                                   "Type your message instead.")
+                    self._set_status("Mic failed — type instead")
+                    self._busy_event.clear()
+                    self._set_busy(False)
+                    return
+            if audio is None:
+                self._append_message("system",
+                                     "I didn't hear anything. Try again.")
+                self._set_idle_status()
                 self._busy_event.clear()
                 self._set_busy(False)
                 return
-        if audio is None:
-            self._append_message("system", "I didn't hear anything. Try again.")
-            self._set_idle_status()
-            self._busy_event.clear()
-            self._set_busy(False)
-            return
-        question = transcribe(audio)
-        if not question:
-            self._append_message("system", "Sorry, I couldn't understand that.")
-            self._set_idle_status()
-            self._busy_event.clear()
-            self._set_busy(False)
-            return
+            question = transcribe(audio)
+            if not question:
+                self._append_message("system", "Sorry, I couldn't understand that.")
+                self._set_idle_status()
+                self._busy_event.clear()
+                self._set_busy(False)
+                return
         self._append_message("user", question)
         self._ask_worker(question)
 

@@ -3,6 +3,8 @@ SpeechRecognition
 # Python 3.13+ removed stdlib audioop; SpeechRecognition needs it for STT.
 audioop-lts; python_version >= "3.13"
 gTTS
+# Offline TTS fallback when gTTS has no internet access
+pyttsx3
 # playsound 1.3.0 is broken; 1.2.2 works reliably on Windows
 playsound==1.2.2
 miniaudio
