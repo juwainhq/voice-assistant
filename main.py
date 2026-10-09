@@ -518,7 +518,7 @@ class VoiceAssistantApp:
         self.speed_scale.pack(fill=tk.X, padx=14, pady=(2, 0))
         speed_labels = tk.Frame(inner, bg=PANEL)
         speed_labels.pack(fill=tk.X, padx=18)
-        for text, side in (("Slow", tk.LEFT), ("Normal", tk.CENTER), ("Fast", tk.RIGHT)):
+        for text, side in (("Slow", tk.LEFT), ("Normal", tk.LEFT), ("Fast", tk.RIGHT)):
             tk.Label(speed_labels, text=text, font=("Segoe UI", 8),
                      bg=PANEL, fg=MUTED).pack(side=side, expand=True)
 
