@@ -502,7 +502,7 @@ def infer_emotion(status: str) -> str:
 
 
 class BubblyFace(tk.Canvas):
-    """A Grok-bot style pearl bubble ball with big eyes and emotions.
+    """A Grok-bot style bubbly ball: glossy kawaii face with big eyes.
 
     The avatar is a glossy white ball (gray crescent shadow behind it for a
     3D look, a bubble-shine highlight, and big glossy eyes). Emotions:
@@ -528,14 +528,22 @@ class BubblyFace(tk.Canvas):
         self.shine_arc = self.create_arc(0, 0, 0, 0, style=tk.ARC,
                                          outline=MUTED, width=3)
         self.shine_dot = self.create_oval(0, 0, 0, 0, fill=MUTED, outline="")
+        self.blush_l = self.create_oval(0, 0, 0, 0, fill=MUTED, outline="")
+        self.blush_r = self.create_oval(0, 0, 0, 0, fill=MUTED, outline="")
+        self.eye_l_white = self.create_oval(0, 0, 0, 0, fill=WHITE,
+                                            outline=MUTED)
+        self.eye_r_white = self.create_oval(0, 0, 0, 0, fill=WHITE,
+                                            outline=MUTED)
         self.eye_l = self.create_oval(0, 0, 0, 0, fill=BLACK, outline="")
         self.eye_r = self.create_oval(0, 0, 0, 0, fill=BLACK, outline="")
+        self.shine_l = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
+        self.shine_r = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
+        self.glint_l2 = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
+        self.glint_r2 = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
         self.eye_l_happy = self.create_arc(0, 0, 0, 0, style=tk.ARC,
                                            outline=BLACK, width=4)
         self.eye_r_happy = self.create_arc(0, 0, 0, 0, style=tk.ARC,
                                            outline=BLACK, width=4)
-        self.shine_l = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
-        self.shine_r = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
         self.brow_l = self.create_line(0, 0, 0, 0, fill=BLACK, width=3)
         self.brow_r = self.create_line(0, 0, 0, 0, fill=BLACK, width=3)
         self.mouth_arc = self.create_arc(0, 0, 0, 0, style=tk.ARC,
@@ -585,48 +593,69 @@ class BubblyFace(tk.Canvas):
         dx, dy = cx - rx * 0.02, cy - ry * 0.82
         self.coords(self.shine_dot, dx - dr, dy - dr, dx + dr, dy + dr)
 
-        # Big glossy eyes — the main feature of the ball
+        # Soft cheek dots (kawaii)
+        br = s * 0.052
+        for item, side in ((self.blush_l, -1), (self.blush_r, 1)):
+            bx, by = cx + side * rx * 0.52, cy + ry * 0.30
+            self.coords(item, bx - br, by - br * 0.72, bx + br, by + br * 0.72)
+
+        # Kawaii glossy eyes: white sclera, big dark pupil, two glints
         blinking = self._blink_left > 0 and emo not in ("happy", "talking")
         happy_eyes = emo in ("happy", "talking")
-        eye_dx = s * 0.16
+        eye_dx = s * 0.155
         eye_cy = cy + s * 0.015
-        ew = s * (0.120 if emo == "listening" else 0.100)
-        eh = s * (0.150 if emo == "listening" else 0.130)
+        sw = s * (0.125 if emo == "listening" else 0.108)  # sclera half-width
+        sh = s * (0.155 if emo == "listening" else 0.138)  # sclera half-height
+        pw, ph = sw * 0.62, sh * 0.66
         if emo == "thinking":
-            pupil_dx, pupil_dy = math.sin(t * 1.3) * s * 0.024, -s * 0.024
+            pupil_dx, pupil_dy = math.sin(t * 1.3) * s * 0.024, -s * 0.022
         elif emo == "sad":
             pupil_dx, pupil_dy = 0.0, s * 0.022
         elif emo == "listening":
             pupil_dx, pupil_dy = 0.0, 0.0
         else:
             pupil_dx, pupil_dy = math.sin(t * 0.7) * s * 0.010, 0.0
-        if blinking:
-            eh = 2.0
 
-        for side, eye, happy, shine in (
-            (-1, self.eye_l, self.eye_l_happy, self.shine_l),
-            (1, self.eye_r, self.eye_r_happy, self.shine_r),
+        for side, white, pupil, glint, glint2, happy in (
+            (-1, self.eye_l_white, self.eye_l, self.shine_l,
+             self.glint_l2, self.eye_l_happy),
+            (1, self.eye_r_white, self.eye_r, self.shine_r,
+             self.glint_r2, self.eye_r_happy),
         ):
             ex = cx + side * eye_dx
             if happy_eyes:
-                self.itemconfig(eye, state="hidden")
-                self.itemconfig(shine, state="hidden")
+                for item in (white, pupil, glint, glint2):
+                    self.itemconfig(item, state="hidden")
                 self.itemconfig(happy, state="normal", start=180, extent=180)
-                self.coords(happy, ex - ew * 1.5, eye_cy - eh * 1.15,
-                            ex + ew * 1.5, eye_cy + eh * 1.15)
+                self.coords(happy, ex - sw * 1.35, eye_cy - sh * 1.05,
+                            ex + sw * 1.35, eye_cy + sh * 1.05)
             else:
                 self.itemconfig(happy, state="hidden")
-                self.itemconfig(eye, state="normal")
-                self.itemconfig(shine, state="normal")
-                ecx, ecy = ex + pupil_dx, eye_cy + pupil_dy
-                self.coords(eye, ecx - ew, ecy - eh, ecx + ew, ecy + eh)
-                sw = ew * 0.38
-                self.coords(shine, ecx - ew * 0.42 - sw, ecy - eh * 0.48 - sw,
-                            ecx - ew * 0.42 + sw, ecy - eh * 0.48 + sw)
+                self.itemconfig(white, state="normal")
+                if blinking:
+                    # Closed eye: a dark lash line
+                    self.itemconfig(white, fill=BLACK, outline="")
+                    for item in (pupil, glint, glint2):
+                        self.itemconfig(item, state="hidden")
+                    self.coords(white, ex - sw, eye_cy - s * 0.012,
+                                ex + sw, eye_cy + s * 0.012)
+                else:
+                    self.itemconfig(white, fill=WHITE, outline=MUTED)
+                    for item in (pupil, glint, glint2):
+                        self.itemconfig(item, state="normal")
+                    self.coords(white, ex - sw, eye_cy - sh, ex + sw, eye_cy + sh)
+                    ecx, ecy = ex + pupil_dx, eye_cy + pupil_dy + s * 0.008
+                    self.coords(pupil, ecx - pw, ecy - ph, ecx + pw, ecy + ph)
+                    g1 = pw * 0.42
+                    self.coords(glint, ecx - pw * 0.42 - g1, ecy - ph * 0.45 - g1,
+                                ecx - pw * 0.42 + g1, ecy - ph * 0.45 + g1)
+                    g2 = pw * 0.20
+                    self.coords(glint2, ecx + pw * 0.45 - g2, ecy + ph * 0.45 - g2,
+                                ecx + pw * 0.45 + g2, ecy + ph * 0.45 + g2)
 
         # Eyebrows carry most of the emotion
-        brow_w = ew * 2.3
-        brow_y = eye_cy - eh * 1.75
+        brow_w = sw * 2.0
+        brow_y = eye_cy - sh * 1.75
         lift = s * 0.030
         for side, brow in ((-1, self.brow_l), (1, self.brow_r)):
             bx = cx + side * eye_dx
@@ -648,27 +677,27 @@ class BubblyFace(tk.Canvas):
                 y1 = y2 = brow_y - lift * 0.5
             self.coords(brow, x1, y1, x2, y2)
 
-        # Mouth: an oval that opens/closes while talking, an arc otherwise
-        mouth_cy = cy + ry * 0.42
+        # Mouth: an oval that opens/closes while talking, a small arc otherwise
+        mouth_cy = cy + ry * 0.40
         if emo == "talking":
             open_amt = 0.35 + 0.65 * abs(math.sin(t * 11.0))
             self.itemconfig(self.mouth_arc, state="hidden")
             self.itemconfig(self.mouth_open, state="normal")
-            mw = rx * 0.22
-            mh = s * 0.026 + open_amt * s * 0.080
+            mw = rx * 0.18
+            mh = s * 0.022 + open_amt * s * 0.070
             self.coords(self.mouth_open, cx - mw, mouth_cy - mh,
                         cx + mw, mouth_cy + mh)
         else:
             self.itemconfig(self.mouth_open, state="hidden")
             self.itemconfig(self.mouth_arc, state="normal")
             if emo in ("happy", "listening"):
-                mw, mh = rx * 0.52, ry * 0.34
+                mw, mh = rx * 0.42, ry * 0.28
                 self.itemconfig(self.mouth_arc, start=0, extent=180)  # big smile
             elif emo == "sad":
-                mw, mh = rx * 0.46, ry * 0.30
+                mw, mh = rx * 0.38, ry * 0.24
                 self.itemconfig(self.mouth_arc, start=180, extent=180)  # frown
-            else:  # idle / thinking: small gentle smile
-                mw, mh = rx * 0.42, ry * 0.26
+            else:  # idle / thinking: tiny cute smile
+                mw, mh = rx * 0.32, ry * 0.20
                 self.itemconfig(self.mouth_arc, start=20, extent=140)
             self.coords(self.mouth_arc, cx - mw, mouth_cy - mh,
                         cx + mw, mouth_cy + mh)
