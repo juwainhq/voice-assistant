@@ -19,6 +19,7 @@ search; saying "open [app]" launches an app from the Allowed Apps list.
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -480,6 +481,191 @@ def parse_memory_command(text: str) -> tuple[str, str] | None:
     return None
 
 
+def infer_emotion(status: str) -> str:
+    """Map a status line to the face emotion."""
+    s = status.lower()
+    if "listening" in s:
+        return "listening"
+    if "thinking" in s or "searching" in s:
+        return "thinking"
+    if "speaking" in s:
+        return "talking"
+    if any(bad in s for bad in ("mic failed", "can't understand", "can't open",
+                               "can't speak", "sorry", "failed", "enter both",
+                               "select an app", "don't have a memory")):
+        return "sad"
+    if any(good in s for good in ("copied", "saved", "cleared", "added",
+                                  "removed", "forgot", "got it",
+                                  "i'll remember", "opening")):
+        return "happy"
+    return "idle"
+
+
+class BubblyFace(tk.Canvas):
+    """An animated bubbly face that shows what the assistant is feeling.
+
+    Emotions: idle, happy, listening, thinking, talking, sad.
+    Every frame it gently bobs, blinks at random intervals, glances around
+    while thinking, and moves its mouth while talking. Drawn with the same
+    monochrome palette as the rest of the UI.
+    """
+
+    FRAME_MS = 90  # animation frame period
+
+    def __init__(self, parent, size: int = 96, **kwargs):
+        super().__init__(parent, width=size, height=size, bg=BG,
+                         highlightthickness=0, borderwidth=0, **kwargs)
+        self.size = size
+        self.emotion = "idle"
+        self._t = 0.0
+        self._blink_in = 2.4
+        self._blink_left = 0.0
+
+        self.head = self.create_oval(0, 0, 0, 0, fill=WHITE,
+                                     outline=ENTRY_BORDER, width=2)
+        self.blush_l = self.create_oval(0, 0, 0, 0, outline=MUTED)
+        self.blush_r = self.create_oval(0, 0, 0, 0, outline=MUTED)
+        self.eye_l = self.create_oval(0, 0, 0, 0, fill=BLACK, outline="")
+        self.eye_r = self.create_oval(0, 0, 0, 0, fill=BLACK, outline="")
+        self.eye_l_happy = self.create_arc(0, 0, 0, 0, style=tk.ARC,
+                                           outline=BLACK, width=3)
+        self.eye_r_happy = self.create_arc(0, 0, 0, 0, style=tk.ARC,
+                                           outline=BLACK, width=3)
+        self.shine_l = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
+        self.shine_r = self.create_oval(0, 0, 0, 0, fill=WHITE, outline="")
+        self.brow_l = self.create_line(0, 0, 0, 0, fill=BLACK, width=3)
+        self.brow_r = self.create_line(0, 0, 0, 0, fill=BLACK, width=3)
+        self.mouth_arc = self.create_arc(0, 0, 0, 0, style=tk.ARC,
+                                         outline=BLACK, width=3)
+        self.mouth_open = self.create_oval(0, 0, 0, 0, fill=BLACK, outline="")
+
+        self.after(self.FRAME_MS, self._tick)
+
+    def set_emotion(self, emotion: str) -> None:
+        """Switch expression: idle, happy, listening, thinking, talking, sad."""
+        if emotion in ("idle", "happy", "listening", "thinking", "talking", "sad"):
+            self.emotion = emotion
+
+    def _tick(self) -> None:
+        dt = self.FRAME_MS / 1000.0
+        self._t += dt
+        self._blink_in -= dt
+        if self._blink_left > 0:
+            self._blink_left -= dt
+        elif self._blink_in <= 0:
+            self._blink_left = 0.13
+            self._blink_in = 2.2 + random.random() * 2.8
+        self._layout()
+        self.after(self.FRAME_MS, self._tick)
+
+    def _layout(self) -> None:
+        s = self.size
+        t = self._t
+        emo = self.emotion
+
+        # Head, gently bobbing (faster and bouncier while talking)
+        speed = 3.2 if emo == "talking" else 1.7
+        amp = 2.6 if emo in ("talking", "happy", "listening") else 1.1
+        cx, cy = s / 2, s / 2 + math.sin(t * speed) * amp
+        rx, ry = s * 0.42, s * 0.40
+        self.coords(self.head, cx - rx, cy - ry, cx + rx, cy + ry)
+
+        # Blush
+        br = s * 0.065
+        for item, side in ((self.blush_l, -1), (self.blush_r, 1)):
+            bx = cx + side * rx * 0.62
+            by = cy + ry * 0.20
+            self.coords(item, bx - br, by - br, bx + br, by + br)
+
+        # Eyes (happy/talking use closed smile arcs; blinking squashes them)
+        blinking = self._blink_left > 0 and emo not in ("happy", "talking")
+        happy_eyes = emo in ("happy", "talking")
+        eye_dx = rx * 0.40
+        eye_cy = cy - ry * 0.12
+        ew = s * (0.105 if emo == "listening" else 0.078)
+        eh = s * (0.115 if emo == "listening" else 0.105)
+        if emo == "thinking":
+            pupil_dx, pupil_dy = math.sin(t * 1.3) * s * 0.022, -s * 0.022
+        elif emo == "sad":
+            pupil_dx, pupil_dy = 0.0, s * 0.02
+        elif emo == "listening":
+            pupil_dx, pupil_dy = 0.0, 0.0
+        else:
+            pupil_dx, pupil_dy = math.sin(t * 0.7) * s * 0.008, 0.0
+        if blinking:
+            eh = 2.0
+
+        for side, eye, happy, shine in (
+            (-1, self.eye_l, self.eye_l_happy, self.shine_l),
+            (1, self.eye_r, self.eye_r_happy, self.shine_r),
+        ):
+            ex = cx + side * eye_dx
+            if happy_eyes:
+                self.itemconfig(eye, state="hidden")
+                self.itemconfig(shine, state="hidden")
+                self.itemconfig(happy, state="normal", start=180, extent=180)
+                self.coords(happy, ex - ew * 1.4, eye_cy - eh * 1.1,
+                            ex + ew * 1.4, eye_cy + eh * 1.1)
+            else:
+                self.itemconfig(happy, state="hidden")
+                self.itemconfig(eye, state="normal")
+                self.itemconfig(shine, state="normal")
+                ecx, ecy = ex + pupil_dx, eye_cy + pupil_dy
+                self.coords(eye, ecx - ew, ecy - eh, ecx + ew, ecy + eh)
+                sw = ew * 0.30
+                self.coords(shine, ecx - ew * 0.35 - sw, ecy - eh * 0.45 - sw,
+                            ecx - ew * 0.35 + sw, ecy - eh * 0.45 + sw)
+
+        # Eyebrows carry most of the emotion
+        brow_w = ew * 2.4
+        brow_y = eye_cy - eh * 2.15
+        lift = s * 0.030
+        for side, brow in ((-1, self.brow_l), (1, self.brow_r)):
+            bx = cx + side * eye_dx
+            x1, x2 = bx - brow_w / 2, bx + brow_w / 2
+            y1 = y2 = brow_y
+            if emo == "listening":
+                y1 = y2 = brow_y - lift
+            elif emo == "thinking":
+                if side == -1:
+                    y1, y2 = brow_y - lift, brow_y - lift * 0.15
+                else:
+                    y1, y2 = brow_y - lift * 0.15, brow_y - lift
+            elif emo == "sad":
+                if side == -1:  # worried: inner ends raised
+                    y1, y2 = brow_y + lift * 0.45, brow_y - lift * 0.55
+                else:
+                    y1, y2 = brow_y - lift * 0.55, brow_y + lift * 0.45
+            elif emo == "happy":
+                y1 = y2 = brow_y - lift * 0.5
+            self.coords(brow, x1, y1, x2, y2)
+
+        # Mouth: an oval that opens/closes while talking, an arc otherwise
+        mouth_cy = cy + ry * 0.32
+        if emo == "talking":
+            open_amt = 0.35 + 0.65 * abs(math.sin(t * 11.0))
+            self.itemconfig(self.mouth_arc, state="hidden")
+            self.itemconfig(self.mouth_open, state="normal")
+            mw = rx * 0.26
+            mh = s * 0.028 + open_amt * s * 0.085
+            self.coords(self.mouth_open, cx - mw, mouth_cy - mh,
+                        cx + mw, mouth_cy + mh)
+        else:
+            self.itemconfig(self.mouth_open, state="hidden")
+            self.itemconfig(self.mouth_arc, state="normal")
+            if emo in ("happy", "listening"):
+                mw, mh = rx * 0.62, ry * 0.42
+                self.itemconfig(self.mouth_arc, start=0, extent=180)  # big smile
+            elif emo == "sad":
+                mw, mh = rx * 0.55, ry * 0.38
+                self.itemconfig(self.mouth_arc, start=180, extent=180)  # frown
+            else:  # idle / thinking: small gentle smile
+                mw, mh = rx * 0.50, ry * 0.32
+                self.itemconfig(self.mouth_arc, start=20, extent=140)
+            self.coords(self.mouth_arc, cx - mw, mouth_cy - mh,
+                        cx + mw, mouth_cy + mh)
+
+
 # ----------------------------------------------------------------------------
 # The desktop app
 # ----------------------------------------------------------------------------
@@ -535,15 +721,19 @@ class VoiceAssistantApp:
 
         # Header
         header = tk.Frame(main, bg=BG)
-        header.pack(fill=tk.X, padx=20, pady=(16, 6))
+        header.pack(fill=tk.X, padx=20, pady=(10, 6))
+        self.face = BubblyFace(header, size=92)
+        self.face.pack(side=tk.LEFT, padx=(0, 14))
+        title_box = tk.Frame(header, bg=BG)
+        title_box.pack(side=tk.LEFT)
         self.title_label = tk.Label(
-            header, text=f"● {self.assistant_name}",
+            title_box, text=self.assistant_name,
             font=FONT_TITLE, bg=BG, fg=TEXT,
         )
-        self.title_label.pack(side=tk.LEFT)
+        self.title_label.pack(anchor="w")
         tk.Label(
-            header, text="  voice assistant", font=FONT, bg=BG, fg=MUTED,
-        ).pack(side=tk.LEFT, padx=(2, 0), pady=(6, 0))
+            title_box, text="voice assistant", font=FONT, bg=BG, fg=MUTED,
+        ).pack(anchor="w")
         self.clear_button = tk.Button(
             header, text="Clear chat", font=FONT_BOLD, command=self._clear_chat,
             bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
@@ -758,7 +948,11 @@ class VoiceAssistantApp:
     # ----- Thread-safe UI updates -------------------------------------------
 
     def _set_status(self, text: str) -> None:
-        self.root.after(0, lambda: self.status_label.config(text=text, fg=MUTED))
+        def apply() -> None:
+            self.status_label.config(text=text, fg=MUTED)
+            self.face.set_emotion(infer_emotion(text))
+
+        self.root.after(0, apply)
 
     def _set_idle_status(self) -> None:
         """Status shown whenever the passive wake listener is armed."""
@@ -894,7 +1088,7 @@ class VoiceAssistantApp:
         self.api_key = self.key_entry.get().strip()
         save_config(self.api_key, self.assistant_name, self.allowed_apps)
         self._configure_gemini()
-        self.title_label.config(text=f"● {self.assistant_name}")
+        self.title_label.config(text=self.assistant_name)
         self.root.title(f"{self.assistant_name} — Voice Assistant")
         self._set_status("Settings saved.")
 
