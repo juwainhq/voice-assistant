@@ -4,7 +4,8 @@ Flow:
     1. Import the API key from config.py and connect to Gemini (google-generativeai).
     2. Introduce the assistant on startup (printed and spoken via pyttsx3).
     3. Loop: "Listening..." → record a spoken question with sounddevice →
-       transcribe it with SpeechRecognition → print and speak Gemini's answer.
+       transcribe it with SpeechRecognition → print Gemini's answer and speak
+       it out loud with pyttsx3 (engine.say() + engine.runAndWait()).
     4. If the microphone fails, fall back to typed input.
     5. Exit when the user says (or types) "quit".
 
@@ -25,6 +26,10 @@ import google.generativeai as genai
 
 from config import GEMINI_API_KEY
 
+# Initialize the text-to-speech engine at the top of the file.
+engine = pyttsx3.init()
+engine.setProperty("rate", 175)  # speaking speed
+
 ASSISTANT_NAME = "Nova"
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 
@@ -35,27 +40,6 @@ SILENCE_THRESHOLD = 0.01  # RMS level treated as speech vs. silence
 WAIT_FOR_SPEECH_SECONDS = 5  # give up if the user says nothing
 SILENCE_SECONDS = 1.2  # stop after this much trailing silence
 MAX_SECONDS = 10  # hard cap on one recording
-
-
-def init_tts() -> pyttsx3.Engine | None:
-    """Set up text-to-speech; return None when speech output is unavailable."""
-    try:
-        engine = pyttsx3.init()
-        engine.setProperty("rate", 175)  # speaking speed
-        return engine
-    except Exception:  # noqa: BLE001 - speech output is optional
-        return None
-
-
-def say(tts: pyttsx3.Engine | None, text: str) -> None:
-    """Speak text out loud; never let TTS errors break the chat loop."""
-    if tts is None:
-        return
-    try:
-        tts.say(text)
-        tts.runAndWait()
-    except Exception:  # noqa: BLE001 - speech output is optional
-        pass
 
 
 def record_question() -> sr.AudioData | None:
@@ -124,11 +108,11 @@ def main() -> None:
 
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(GEMINI_MODEL)
-    tts = init_tts()
 
     greeting = f"Hello! I'm {ASSISTANT_NAME}, your Gemini-powered assistant."
     print(greeting)
-    say(tts, greeting)
+    engine.say(greeting)
+    engine.runAndWait()
     print("Ask me anything. Say 'quit' to exit.\n")
 
     mic_ok = True
@@ -159,7 +143,8 @@ def main() -> None:
 
         if question.lower().strip() == "quit":
             print(f"{ASSISTANT_NAME}: Goodbye!")
-            say(tts, "Goodbye!")
+            engine.say("Goodbye!")
+            engine.runAndWait()
             break
 
         try:
@@ -168,8 +153,10 @@ def main() -> None:
         except Exception as error:  # noqa: BLE001 - keep the loop alive
             answer = f"Sorry, I ran into a problem: {error}"
 
+        # Print AND speak every reply.
         print(f"{ASSISTANT_NAME}: {answer}\n")
-        say(tts, answer)
+        engine.say(answer)
+        engine.runAndWait()
 
 
 if __name__ == "__main__":
