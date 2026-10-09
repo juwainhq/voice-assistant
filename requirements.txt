@@ -1,5 +1,5 @@
 google-generativeai
 SpeechRecognition
 pyttsx3
-pyaudio
+sounddevice
 requests
