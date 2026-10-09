@@ -2,33 +2,33 @@
 
 Flow:
     1. Import the API key from config.py and connect to Gemini (google-generativeai).
-    2. Introduce the assistant on startup (printed and spoken via pyttsx3).
+    2. Introduce the assistant on startup (printed and spoken via gTTS).
     3. Loop: "Listening..." → record a spoken question with sounddevice →
        transcribe it with SpeechRecognition → print Gemini's answer and speak
-       it out loud with pyttsx3 (engine.say() + engine.runAndWait()).
+       it out loud with gTTS (temp mp3 played via playsound, then deleted).
     4. If the microphone fails, fall back to typed input.
     5. Exit when the user says (or types) "quit".
 
 Microphone capture uses `sounddevice` instead of PyAudio so the project
 installs cleanly on Python 3.14. SpeechRecognition is only used for
-speech-to-text, which does not need PyAudio.
+speech-to-text, which does not need PyAudio. Text-to-speech uses gTTS
+and playsound.
 """
 
 import math
+import os
 import sys
+import tempfile
 import time
 
 import numpy as np
 import sounddevice as sd
 import speech_recognition as sr
-import pyttsx3
+from gtts import gTTS
+from playsound import playsound
 import google.generativeai as genai
 
 from config import GEMINI_API_KEY
-
-# Initialize the text-to-speech engine at the top of the file.
-engine = pyttsx3.init()
-engine.setProperty("rate", 175)  # speaking speed
 
 ASSISTANT_NAME = "Nova"
 GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -42,16 +42,25 @@ SILENCE_SECONDS = 0.8  # stop recording 0.8 s after you finish speaking
 MAX_SECONDS = 10  # hard cap on one recording
 
 
-def fresh_engine() -> pyttsx3.Engine:
-    """Return a new pyttsx3 engine for one utterance.
+def speak(text: str) -> None:
+    """Speak text out loud: gTTS -> temp mp3 -> playsound -> delete the temp file.
 
-    Reusing a single engine across runAndWait() calls can make pyttsx3 fall
-    silent after the first line on Windows, so every reply gets a fresh
-    engine to guarantee it is actually spoken.
+    Speech errors are reported but never crash the chat loop.
     """
-    new_engine = pyttsx3.init()
-    new_engine.setProperty("rate", 175)  # speaking speed
-    return new_engine
+    if not text:
+        return
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
+        mp3_path = tmp_file.name
+    try:
+        gTTS(text).save(mp3_path)  # convert the text to speech (writes the mp3)
+        playsound(mp3_path)  # play the mp3 out loud
+    except Exception as error:  # noqa: BLE001 - speech output is optional
+        print(f"(Could not speak the reply: {error})")
+    finally:
+        try:
+            os.remove(mp3_path)  # delete the temp file after playing
+        except OSError:
+            pass
 
 
 def record_question() -> sr.AudioData | None:
@@ -115,8 +124,6 @@ def transcribe(audio: sr.AudioData) -> str | None:
 
 
 def main() -> None:
-    global engine  # refreshed before each utterance (see fresh_engine)
-
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
         sys.exit("Set your Gemini API key in config.py before running.")
 
@@ -125,8 +132,7 @@ def main() -> None:
 
     greeting = f"Hello! I'm {ASSISTANT_NAME}, your Gemini-powered assistant."
     print(greeting)
-    engine.say(greeting)
-    engine.runAndWait()
+    speak(greeting)
     print("Ask me anything. Say 'quit' to exit.\n")
 
     mic_ok = True
@@ -157,9 +163,7 @@ def main() -> None:
 
         if question.lower().strip() == "quit":
             print(f"{ASSISTANT_NAME}: Goodbye!")
-            engine = fresh_engine()
-            engine.say("Goodbye!")
-            engine.runAndWait()
+            speak("Goodbye!")
             break
 
         try:
@@ -168,11 +172,9 @@ def main() -> None:
         except Exception as error:  # noqa: BLE001 - keep the loop alive
             answer = f"Sorry, I ran into a problem: {error}"
 
-        # Print and speak EVERY reply, not just the opening line.
+        # Print and speak EVERY reply: gTTS temp mp3 -> playsound -> delete.
         print(f"{ASSISTANT_NAME}: {answer}\n")
-        engine = fresh_engine()  # fresh engine so pyttsx3 never falls silent
-        engine.say(answer)
-        engine.runAndWait()
+        speak(answer)
 
 
 if __name__ == "__main__":
