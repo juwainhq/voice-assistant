@@ -3,5 +3,8 @@ SpeechRecognition
 gTTS
 # playsound 1.3.0 is broken; 1.2.2 works reliably on Windows
 playsound==1.2.2
+miniaudio
+pystray
+Pillow
 sounddevice
 requests
