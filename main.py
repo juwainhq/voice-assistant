@@ -91,6 +91,33 @@ FONT_SECTION = ("Segoe UI", 12, "bold")
 # Voice I/O, web search, commands, and config helpers
 # ----------------------------------------------------------------------------
 
+def _open_input_stream(callback):
+    """Open a mic stream, trying common configs until one is accepted.
+
+    Some devices reject 16 kHz or mono. Failing silently on those machines
+    made it look like the assistant "wasn't listening", so try a few configs.
+    """
+    try:
+        device_rate = int(sd.query_devices(kind="input")["default_samplerate"])
+    except Exception:  # noqa: BLE001 - no device info available
+        device_rate = SAMPLE_RATE
+    last_error = None
+    for rate, channels in ((SAMPLE_RATE, 1), (SAMPLE_RATE, 2),
+                           (device_rate, 1), (device_rate, 2)):
+        try:
+            stream = sd.InputStream(
+                samplerate=rate,
+                channels=channels,
+                dtype="float32",
+                blocksize=max(int(rate * CHUNK_SECONDS), 128),
+                callback=callback,
+            )
+            return stream, rate
+        except Exception as error:  # noqa: BLE001 - try the next config
+            last_error = error
+    raise RuntimeError(f"Could not open the microphone: {last_error}")
+
+
 def record_question() -> sr.AudioData | None:
     """Record one spoken question with sounddevice and return it as AudioData.
 
@@ -102,21 +129,17 @@ def record_question() -> sr.AudioData | None:
 
     def callback(indata, frames, time_info, status):
         chunks.append(indata.copy())
-        rms = math.sqrt(sum(float(x) ** 2 for x in indata[:, 0]) / max(frames, 1))
+        mono = indata.mean(axis=1) if indata.ndim > 1 else indata
+        rms = float(np.sqrt(np.mean(mono ** 2))) if len(mono) else 0.0
         if rms >= SILENCE_THRESHOLD:
             state["heard_speech"] = True
             state["silent_chunks"] = 0
         else:
             state["silent_chunks"] += 1
 
+    stream, rate = _open_input_stream(callback)
     start = time.monotonic()
-    with sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype="float32",
-        blocksize=int(SAMPLE_RATE * CHUNK_SECONDS),
-        callback=callback,
-    ):
+    with stream:
         while True:
             time.sleep(CHUNK_SECONDS)
             elapsed = time.monotonic() - start
@@ -133,20 +156,26 @@ def record_question() -> sr.AudioData | None:
     if not state["heard_speech"] or not chunks:
         return None
 
-    # Convert float32 samples to 16-bit PCM for SpeechRecognition.
+    # Convert float32 samples to 16-bit mono PCM for SpeechRecognition.
     audio = np.concatenate(chunks, axis=0)
-    pcm = (np.clip(audio[:, 0], -1.0, 1.0) * 32767).astype(np.int16).tobytes()
-    return sr.AudioData(pcm, SAMPLE_RATE, 2)
+    mono = audio.mean(axis=1) if audio.ndim > 1 else audio
+    pcm = (np.clip(mono, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+    return sr.AudioData(pcm, rate, 2)
 
 
 def transcribe(audio: sr.AudioData) -> str | None:
-    """Convert recorded audio to text with Google speech recognition."""
+    """Convert recorded audio to text with Google speech recognition.
+
+    Any failure (including missing audioop on new Python versions) is
+    swallowed so the listening threads never die silently.
+    """
     recognizer = sr.Recognizer()
     try:
         return recognizer.recognize_google(audio)
     except sr.UnknownValueError:
         return None
-    except sr.RequestError:
+    except Exception as error:  # noqa: BLE001 - keep the listener alive
+        print(f"[transcribe] speech recognition failed: {error}")
         return None
 
 
@@ -190,7 +219,11 @@ def speak(text: str, speed: str = "normal",
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
         mp3_path = tmp_file.name
     try:
-        gTTS(text, slow=(speed == "slow")).save(mp3_path)
+        try:
+            tts = gTTS(text, slow=(speed == "slow"), timeout=10)
+        except TypeError:  # older gTTS without a timeout parameter
+            tts = gTTS(text, slow=(speed == "slow"))
+        tts.save(mp3_path)
         rate = FAST_RATE if speed == "fast" else 1.0
         _play_mp3(mp3_path, rate, cancel)
     except Exception:  # noqa: BLE001 - speech output is optional
@@ -200,6 +233,19 @@ def speak(text: str, speed: str = "normal",
             os.remove(mp3_path)  # delete the temp file after playing
         except OSError:
             pass
+
+
+def play_tone(frequency: int = 880, duration: float = 0.12,
+              volume: float = 0.25) -> None:
+    """Play a short confirmation tone (the audible "I'm listening" cue)."""
+    try:
+        rate = 22050
+        t = np.linspace(0, duration, int(rate * duration), endpoint=False)
+        tone = (np.sin(2 * np.pi * frequency * t) * volume).astype(np.float32)
+        sd.play(tone, samplerate=rate)
+        sd.wait()
+    except Exception:  # noqa: BLE001 - audio feedback is optional
+        pass
 
 
 def extract_search_query(text: str) -> str | None:
@@ -222,18 +268,34 @@ def extract_open_app(text: str) -> str | None:
     return None
 
 
-def split_wake_word(text: str, wake_name: str) -> str | None:
-    """Split an utterance on the wake word.
+# Utterances that are just "wake me up" chatter with no real question yet.
+WAKE_ONLY_TAILS = {
+    "", "i have a question", "i've got a question", "ive got a question",
+    "question", "yes", "yeah", "hello", "hi", "hey", "are you there",
+    "can you hear me", "wake up", "you there", "it's me", "its me",
+}
 
-    Returns None when the wake word is absent, "" when the utterance is only
-    the wake word, or the question that follows the wake word.
+
+def extract_wake_question(text: str, wake_name: str) -> str | None:
+    """Detect the wake phrase and split off the question that follows.
+
+    Matches "Nova", "hey Nova", "ok Nova", "Nova I have a question", etc.
+    Returns None when the wake phrase is absent, "" when the utterance is
+    only the wake phrase (so the caller should listen for the question),
+    or the question that follows it.
     """
     if not wake_name:
         return None
-    match = re.search(rf"\b{re.escape(wake_name)}\b(.*)$", text, flags=re.IGNORECASE)
+    match = re.match(
+        rf"^\s*(?:please\s+)?(?:(?:hey(?:\s+there)?|ok(?:ay)?|hi|hello|yo)\s+)?"
+        rf"{re.escape(wake_name)}\b(?P<tail>.*)$",
+        text.strip(),
+        flags=re.IGNORECASE,
+    )
     if not match:
         return None
-    return match.group(1).strip(" .:!?")
+    tail = match.group("tail").strip(" .,:!?")
+    return "" if tail.lower() in WAKE_ONLY_TAILS else tail
 
 
 def duckduckgo_search(query: str, max_results: int = 5) -> str:
@@ -346,6 +408,8 @@ class VoiceAssistantApp:
         self._speech_cancel = threading.Event()  # set to stop playback
         self._running = True
         self._speed = "normal"
+        self._last_answer = ""
+        self._pending_quit = False
         self._msg_counter = 0
         self._copy_texts: dict[str, str] = {}
         self._typing_active = False
@@ -578,12 +642,16 @@ class VoiceAssistantApp:
             ),
             history=list(history),
         )
-        self._set_status(f'Ready — say "{self.assistant_name}" to talk')
+        self._set_idle_status()
 
     # ----- Thread-safe UI updates -------------------------------------------
 
     def _set_status(self, text: str) -> None:
         self.root.after(0, lambda: self.status_label.config(text=text, fg=MUTED))
+
+    def _set_idle_status(self) -> None:
+        """Status shown whenever the passive wake listener is armed."""
+        self._set_status(f'Ready — say "Hey {self.assistant_name}" to talk')
 
     def _append_message(self, role: str, text: str) -> None:
         def insert() -> None:
@@ -698,7 +766,7 @@ class VoiceAssistantApp:
         except Exception:  # noqa: BLE001 - no active stream
             pass
         self._speaking_event.clear()
-        self._set_status("Ready")
+        self._set_idle_status()
 
     def _clear_chat(self) -> None:
         self.chat_view.configure(state=tk.NORMAL)
@@ -815,8 +883,9 @@ class VoiceAssistantApp:
     def _greet(self) -> None:
         greeting = (
             f"Hello! I'm {self.assistant_name}, your voice assistant. "
-            f"Say '{self.assistant_name}' to talk, ask me anything, "
-            "or say 'search for' to look something up."
+            f"Say 'Hey {self.assistant_name}' or '{self.assistant_name}' to talk, "
+            "ask me anything, or say 'search for' to look something up. "
+            "Say 'help' to hear what I can do."
         )
         self._append_message("assistant", greeting)
         threading.Thread(target=self._speak, args=(greeting,), daemon=True).start()
@@ -830,34 +899,49 @@ class VoiceAssistantApp:
         with self.speech_lock:
             speak(text, self._speed, cancel)
         self._speaking_event.clear()
-        self._set_status("Ready")
+        self._set_idle_status()
 
     def _wake_word_worker(self) -> None:
-        """Passively listen for the assistant's name and activate on a match."""
+        """Passively listen for the wake phrase and activate on a match.
+
+        Wake phrases: "Hey Nova", "Nova", "Nova I have a question", ...
+        The loop must never die — every error is caught and retried.
+        """
+        unclear = 0
         while self._running:
-            if self._busy_event.is_set() or self._speaking_event.is_set():
-                time.sleep(0.2)
-                continue
-            with self._audio_lock:
-                try:
-                    audio = record_question()
-                except Exception:  # noqa: BLE001 - mic trouble; retry
-                    time.sleep(1.0)
+            try:
+                if self._busy_event.is_set() or self._speaking_event.is_set():
+                    time.sleep(0.2)
                     continue
-            if audio is None or self._busy_event.is_set() or self._speaking_event.is_set():
-                continue
-            text = transcribe(audio)
-            if not text:
-                continue
-            question = split_wake_word(text, self.assistant_name)
-            if question is None:
-                continue
-            self.root.after(0, self._restore_window)
-            if question:
-                self._append_message("user", question)
-                self._ask_worker(question)
-            else:
-                self._listen_worker()  # just the wake word -> hear the question
+                with self._audio_lock:
+                    audio = record_question()
+                if audio is None or self._busy_event.is_set() or self._speaking_event.is_set():
+                    continue
+                text = transcribe(audio)
+                if not text:
+                    unclear += 1
+                    if unclear >= 5:
+                        unclear = 0
+                        self._set_status(
+                            "Wake listener is running but can't understand audio — "
+                            "check the mic and internet connection."
+                        )
+                    continue
+                unclear = 0
+                question = extract_wake_question(text, self.assistant_name)
+                if question is None:
+                    continue
+                # Wake phrase confirmed: show the window, beep, then act.
+                self.root.after(0, self._restore_window)
+                play_tone(880, 0.12)
+                if question:
+                    self._append_message("user", question)
+                    self._ask_worker(question)
+                else:
+                    self._listen_worker()  # just the wake phrase -> hear the question
+            except Exception as error:  # noqa: BLE001 - the listener must never die
+                print(f"[wake listener] {error}")
+                time.sleep(1.0)
 
     def _listen_worker(self) -> None:
         self._busy_event.set()
@@ -875,23 +959,66 @@ class VoiceAssistantApp:
                 return
         if audio is None:
             self._append_message("system", "I didn't hear anything. Try again.")
-            self._set_status("Ready")
+            self._set_idle_status()
             self._busy_event.clear()
             self._set_busy(False)
             return
         question = transcribe(audio)
         if not question:
             self._append_message("system", "Sorry, I couldn't understand that.")
-            self._set_status("Ready")
+            self._set_idle_status()
             self._busy_event.clear()
             self._set_busy(False)
             return
         self._append_message("user", question)
         self._ask_worker(question)
 
+    def _local_command(self, question: str) -> str | None:
+        """Handle built-in commands locally; return None to defer to Gemini."""
+        q = question.lower().strip().strip(" .!?")
+        if q in ("stop", "stop speaking", "be quiet", "quiet"):
+            self._stop_speaking()
+            return "Okay, stopping."
+        if q in ("clear chat", "clear the chat", "reset conversation",
+                 "start over", "new chat"):
+            self.root.after(0, self._clear_chat)
+            return "Chat cleared. What would you like to talk about?"
+        if q in ("what time is it", "tell me the time", "the time please"):
+            return f"It's {time.strftime('%I:%M %p').lstrip('0')}."
+        if q in ("what's the date", "what is the date", "what day is it",
+                 "what's today", "what is today", "today's date"):
+            return f"Today is {time.strftime('%A, %B %d, %Y')}."
+        if q in ("help", "what can you do", "your features", "features"):
+            return (
+                "You can ask me anything, say 'search for' to look something up, "
+                "'open' plus an app name to launch a program, 'what time is it', "
+                "'clear chat', 'repeat that', or 'stop' to silence me. "
+                f"Just say 'Hey {self.assistant_name}' to start."
+            )
+        if q in ("repeat", "repeat that", "say that again", "come again"):
+            return self._last_answer or "I haven't said anything yet."
+        if q in ("goodbye", "exit app", "quit app", "bye"):
+            self._pending_quit = True
+            return "Goodbye!"
+        return None
+
     def _ask_worker(self, question: str) -> None:
         self._busy_event.set()
         self._set_busy(True)
+
+        # Built-in commands: instant, no Gemini round-trip needed.
+        local_answer = self._local_command(question)
+        if local_answer is not None:
+            self._last_answer = local_answer
+            self._append_message("assistant", local_answer)
+            self._speak(local_answer)
+            if self._pending_quit:
+                self._pending_quit = False
+                self._quit_app()
+                return
+            self._busy_event.clear()
+            self._set_busy(False)
+            return
 
         # "open [app name]" -> launch from the Allowed Apps list.
         app_name = extract_open_app(question)
@@ -928,6 +1055,7 @@ class VoiceAssistantApp:
             except Exception as error:  # noqa: BLE001 - keep the app alive
                 answer = f"Sorry, I ran into a problem: {error}"
         self._hide_typing()
+        self._last_answer = answer
         self._append_message("assistant", answer)
         self._speak(answer)
         self._busy_event.clear()
