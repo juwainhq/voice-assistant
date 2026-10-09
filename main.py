@@ -24,7 +24,7 @@ import google.generativeai as genai
 from config import GEMINI_API_KEY
 
 ASSISTANT_NAME = "Nova"
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 # Microphone recording settings
 SAMPLE_RATE = 16000  # samples per second
