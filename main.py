@@ -67,21 +67,18 @@ WAIT_FOR_SPEECH_SECONDS = 5  # give up if the user says nothing
 SILENCE_SECONDS = 0.8  # stop recording 0.8 s after you finish speaking
 MAX_SECONDS = 10  # hard cap on one recording
 
-# Dark theme colors
-BG = "#0f1220"  # window background
-PANEL = "#161a2c"  # settings panel
-CARD = "#1b2036"  # chat surface
-ENTRY_BG = "#242a42"
-ENTRY_BORDER = "#333b5c"
-TEXT = "#e9ecf7"
-SOFT = "#b9c0d8"
-MUTED = "#8189a6"
-ACCENT = "#6c8cff"
-ACCENT_HOVER = "#87a1ff"
-WHITE = "#ffffff"
-GREEN = "#63d68f"
-AMBER = "#f0b35c"
-RED = "#f07373"
+# Monochrome design system
+BG = "#000000"  # window background (pure black)
+PANEL = "#0A0A0A"  # settings panel background
+CARD = "#0A0A0A"  # chat window background
+GRAY = "#141414"  # cards, panels, idle buttons
+ENTRY_BG = "#141414"  # input fields
+ENTRY_BORDER = "#242424"  # borders
+TEXT = "#FAFAFA"  # white text
+SOFT = "#FAFAFA"  # message text
+MUTED = "#8C8C8C"  # muted text (status, hints)
+WHITE = "#FAFAFA"  # highlight: active buttons, focused fields, mic button
+BLACK = "#000000"  # text on white buttons
 
 FONT = ("Segoe UI", 10)
 FONT_BOLD = ("Segoe UI", 10, "bold")
@@ -387,7 +384,7 @@ class VoiceAssistantApp:
         ).pack(side=tk.LEFT, padx=(2, 0), pady=(6, 0))
         self.clear_button = tk.Button(
             header, text="Clear chat", font=FONT_BOLD, command=self._clear_chat,
-            bg=PANEL, fg=SOFT, activebackground=ENTRY_BG, activeforeground=TEXT,
+            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
             relief=tk.FLAT, padx=12, pady=6, cursor="hand2", borderwidth=0,
         )
         self.clear_button.pack(side=tk.RIGHT, pady=(4, 0))
@@ -407,9 +404,9 @@ class VoiceAssistantApp:
         self.chat_view.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.chat_view.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.chat_view.tag_configure("user_name", foreground=ACCENT, font=FONT_BOLD)
-        self.chat_view.tag_configure("assistant_name", foreground=GREEN, font=FONT_BOLD)
-        self.chat_view.tag_configure("system_name", foreground=AMBER, font=FONT_BOLD)
+        self.chat_view.tag_configure("user_name", foreground=TEXT, font=FONT_BOLD)
+        self.chat_view.tag_configure("assistant_name", foreground=TEXT, font=FONT_BOLD)
+        self.chat_view.tag_configure("system_name", foreground=MUTED, font=FONT_BOLD)
         self.chat_view.tag_configure("user_text", foreground=TEXT, lmargin1=10, lmargin2=10)
         self.chat_view.tag_configure("assistant_text", foreground=SOFT,
                                      lmargin1=10, lmargin2=10)
@@ -417,7 +414,7 @@ class VoiceAssistantApp:
                                      lmargin1=10, lmargin2=10)
         self.chat_view.tag_configure("typing_line", foreground=MUTED,
                                      font=("Segoe UI", 10, "italic"))
-        self.chat_view.tag_configure("copy_link", foreground=ACCENT,
+        self.chat_view.tag_configure("copy_link", foreground=WHITE,
                                      font=("Segoe UI", 8, "underline"))
 
         # Status line
@@ -433,28 +430,28 @@ class VoiceAssistantApp:
         input_row.pack(fill=tk.X)
         self.mic_button = tk.Button(
             input_row, text="Mic", font=FONT_BOLD, command=self.on_mic,
-            bg=ACCENT, fg=WHITE, activebackground=ACCENT_HOVER,
-            activeforeground=WHITE, relief=tk.FLAT, padx=18, pady=8,
+            bg=WHITE, fg=BLACK, activebackground=WHITE,
+            activeforeground=BLACK, relief=tk.FLAT, padx=18, pady=8,
             cursor="hand2", borderwidth=0,
         )
         self.mic_button.pack(side=tk.LEFT, padx=(0, 8))
         self.stop_button = tk.Button(
             input_row, text="Stop", font=FONT_BOLD, command=self._stop_speaking,
-            bg=PANEL, fg=RED, activebackground=ENTRY_BG, activeforeground=RED,
+            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
             relief=tk.FLAT, padx=14, pady=8, cursor="hand2", borderwidth=0,
         )
         self.stop_button.pack(side=tk.LEFT, padx=(0, 10))
         self.entry = tk.Entry(
             input_row, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT, font=FONT,
             relief=tk.FLAT, highlightthickness=1, highlightbackground=ENTRY_BORDER,
-            highlightcolor=ACCENT,
+            highlightcolor=WHITE,
         )
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8)
         self.entry.bind("<Return>", lambda _event: self.on_send())
         self.send_button = tk.Button(
             input_row, text="Send", font=FONT_BOLD, command=self.on_send,
-            bg=ACCENT, fg=WHITE, activebackground=ACCENT_HOVER,
-            activeforeground=WHITE, relief=tk.FLAT, padx=18, pady=8,
+            bg=GRAY, fg=TEXT, activebackground=WHITE,
+            activeforeground=BLACK, relief=tk.FLAT, padx=18, pady=8,
             cursor="hand2", borderwidth=0,
         )
         self.send_button.pack(side=tk.LEFT, padx=(10, 0))
@@ -489,7 +486,7 @@ class VoiceAssistantApp:
             widget = tk.Entry(
                 inner, show=show, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
                 font=FONT, relief=tk.FLAT, highlightthickness=1,
-                highlightbackground=ENTRY_BORDER, highlightcolor=ACCENT,
+                highlightbackground=ENTRY_BORDER, highlightcolor=WHITE,
             )
             widget.pack(fill=tk.X, padx=18, pady=(4, 0), ipady=6)
             return widget
@@ -511,7 +508,7 @@ class VoiceAssistantApp:
         self.speed_scale = tk.Scale(
             inner, from_=0, to=2, resolution=1, orient=tk.HORIZONTAL,
             showvalue=False, bg=PANEL, fg=TEXT, highlightthickness=0,
-            troughcolor=ENTRY_BG, activebackground=ACCENT, sliderrelief=tk.FLAT,
+            troughcolor=ENTRY_BG, activebackground=WHITE, sliderrelief=tk.FLAT,
             command=self._on_speed_change,
         )
         self.speed_scale.set(1)
@@ -527,7 +524,7 @@ class VoiceAssistantApp:
         self.apps_list = tk.Listbox(
             inner, bg=ENTRY_BG, fg=TEXT, font=("Segoe UI", 9), relief=tk.FLAT,
             highlightthickness=1, highlightbackground=ENTRY_BORDER,
-            selectbackground=ACCENT, selectforeground=WHITE, height=5,
+            selectbackground=WHITE, selectforeground=BLACK, height=5,
             activestyle="none", borderwidth=0,
         )
         self.apps_list.pack(fill=tk.X, padx=18, pady=(4, 0))
@@ -541,22 +538,22 @@ class VoiceAssistantApp:
         apps_buttons.pack(fill=tk.X, padx=18, pady=(8, 0))
         self.add_app_button = tk.Button(
             apps_buttons, text="Add", font=FONT_BOLD, command=self._add_app,
-            bg=ACCENT, fg=WHITE, activebackground=ACCENT_HOVER,
-            activeforeground=WHITE, relief=tk.FLAT, pady=6, cursor="hand2",
+            bg=GRAY, fg=TEXT, activebackground=WHITE,
+            activeforeground=BLACK, relief=tk.FLAT, pady=6, cursor="hand2",
             borderwidth=0,
         )
         self.add_app_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         self.remove_app_button = tk.Button(
             apps_buttons, text="Remove", font=FONT_BOLD, command=self._remove_app,
-            bg=PANEL, fg=RED, activebackground=ENTRY_BG, activeforeground=RED,
+            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
             relief=tk.FLAT, pady=6, cursor="hand2", borderwidth=0,
         )
         self.remove_app_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
 
         save_button = tk.Button(
             inner, text="Save settings", font=FONT_BOLD, command=self.save_settings,
-            bg=ACCENT, fg=WHITE, activebackground=ACCENT_HOVER,
-            activeforeground=WHITE, relief=tk.FLAT, pady=8, cursor="hand2",
+            bg=GRAY, fg=TEXT, activebackground=WHITE,
+            activeforeground=BLACK, relief=tk.FLAT, pady=8, cursor="hand2",
             borderwidth=0,
         )
         save_button.pack(fill=tk.X, padx=18, pady=18)
@@ -567,7 +564,7 @@ class VoiceAssistantApp:
         if not self.api_key or self.api_key == PLACEHOLDER_KEY:
             self.client = None
             self.chat = None
-            self._set_status("Set your Gemini API key in Settings to start chatting.", AMBER)
+            self._set_status("Set your Gemini API key in Settings to start chatting.")
             return
         self.client = genai.Client(api_key=self.api_key)
         history = self.chat.get_history() if self.chat is not None else []
@@ -585,8 +582,8 @@ class VoiceAssistantApp:
 
     # ----- Thread-safe UI updates -------------------------------------------
 
-    def _set_status(self, text: str, color: str = MUTED) -> None:
-        self.root.after(0, lambda: self.status_label.config(text=text, fg=color))
+    def _set_status(self, text: str) -> None:
+        self.root.after(0, lambda: self.status_label.config(text=text, fg=MUTED))
 
     def _append_message(self, role: str, text: str) -> None:
         def insert() -> None:
@@ -622,7 +619,7 @@ class VoiceAssistantApp:
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
-        self._set_status("Copied to clipboard.", GREEN)
+        self._set_status("Copied to clipboard.")
 
     def _set_busy(self, busy: bool) -> None:
         def apply() -> None:
@@ -711,7 +708,7 @@ class VoiceAssistantApp:
         self._typing_start = "1.0"
         self.chat = None
         self._configure_gemini()  # fresh chat with empty history
-        self._set_status("Chat cleared — memory reset.", GREEN)
+        self._set_status("Chat cleared — memory reset.")
 
     def save_settings(self) -> None:
         self.assistant_name = self.name_entry.get().strip() or DEFAULT_ASSISTANT_NAME
@@ -720,7 +717,7 @@ class VoiceAssistantApp:
         self._configure_gemini()
         self.title_label.config(text=f"● {self.assistant_name}")
         self.root.title(f"{self.assistant_name} — Voice Assistant")
-        self._set_status("Settings saved.", GREEN)
+        self._set_status("Settings saved.")
 
     # ----- Allowed Apps -------------------------------------------------------
 
@@ -743,23 +740,23 @@ class VoiceAssistantApp:
         name = self.app_name_entry.get().strip()
         path = self.app_path_entry.get().strip()
         if not name or not path or name == "app name" or path == "file path":
-            self._set_status("Enter both an app name and a file path.", AMBER)
+            self._set_status("Enter both an app name and a file path.")
             return
         self.allowed_apps[name] = path
         save_config(self.api_key, self.assistant_name, self.allowed_apps)
         self._refresh_apps_list()
-        self._set_status(f"Added '{name}' to Allowed Apps.", GREEN)
+        self._set_status(f"Added '{name}' to Allowed Apps.")
 
     def _remove_app(self) -> None:
         selection = self.apps_list.curselection()
         if not selection:
-            self._set_status("Select an app to remove.", AMBER)
+            self._set_status("Select an app to remove.")
             return
         name = self.apps_list.get(selection[0])
         self.allowed_apps.pop(name, None)
         save_config(self.api_key, self.assistant_name, self.allowed_apps)
         self._refresh_apps_list()
-        self._set_status(f"Removed '{name}' from Allowed Apps.", GREEN)
+        self._set_status(f"Removed '{name}' from Allowed Apps.")
 
     def _open_app(self, app_name: str) -> str:
         for name, path in self.allowed_apps.items():
@@ -776,11 +773,11 @@ class VoiceAssistantApp:
     def _setup_tray(self) -> None:
         if not TRAY_AVAILABLE:
             return
-        image = Image.new("RGBA", (64, 64), (15, 18, 32, 255))
+        image = Image.new("RGBA", (64, 64), (0, 0, 0, 255))
         draw = ImageDraw.Draw(image)
-        draw.ellipse((6, 6, 58, 58), fill=(108, 140, 255, 255))
-        draw.ellipse((20, 20, 44, 44), fill=(22, 26, 44, 255))
-        draw.ellipse((28, 28, 36, 36), fill=(99, 214, 143, 255))
+        draw.ellipse((6, 6, 58, 58), fill=(250, 250, 250, 255))
+        draw.ellipse((20, 20, 44, 44), fill=(10, 10, 10, 255))
+        draw.ellipse((28, 28, 36, 36), fill=(250, 250, 250, 255))
         menu = pystray.Menu(
             pystray.MenuItem("Open", self._show_window, default=True),
             pystray.MenuItem("Quit", self._quit_app),
@@ -792,7 +789,7 @@ class VoiceAssistantApp:
 
     def _hide_to_tray(self) -> None:
         self.root.withdraw()
-        self._set_status("Minimized to tray.", MUTED)
+        self._set_status("Minimized to tray.")
 
     def _show_window(self, *_args) -> None:
         self.root.after(0, self._restore_window)
@@ -829,7 +826,7 @@ class VoiceAssistantApp:
         cancel = threading.Event()
         self._speech_cancel = cancel
         self._speaking_event.set()
-        self._set_status("Speaking...", GREEN)
+        self._set_status("Speaking...")
         with self.speech_lock:
             speak(text, self._speed, cancel)
         self._speaking_event.clear()
@@ -865,14 +862,14 @@ class VoiceAssistantApp:
     def _listen_worker(self) -> None:
         self._busy_event.set()
         self._set_busy(True)
-        self._set_status("Listening...", AMBER)
+        self._set_status("Listening...")
         with self._audio_lock:
             try:
                 audio = record_question()
             except Exception as error:  # noqa: BLE001 - mic problems fall back to typing
                 self._append_message("system", f"Microphone failed: {error}. "
                                                "Type your message instead.")
-                self._set_status("Mic failed — type instead", RED)
+                self._set_status("Mic failed — type instead")
                 self._busy_event.clear()
                 self._set_busy(False)
                 return
@@ -910,7 +907,7 @@ class VoiceAssistantApp:
         prompt = question
         query = extract_search_query(question)
         if query:
-            self._set_status("Searching...", AMBER)
+            self._set_status("Searching...")
             results = duckduckgo_search(query)
             prompt = (
                 f"The user asked me to search the web for: {query}\n"
@@ -921,7 +918,7 @@ class VoiceAssistantApp:
             )
 
         self._show_typing()  # animated dots while Gemini thinks
-        self._set_status("Thinking...", ACCENT)
+        self._set_status("Thinking...")
         if self.chat is None:
             answer = "Set your Gemini API key in the Settings panel to start chatting."
         else:
