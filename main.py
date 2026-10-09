@@ -16,6 +16,7 @@ playsound as a fallback. Saying "search for ..." triggers a DuckDuckGo web
 search; saying "open [app]" launches an app from the Allowed Apps list.
 """
 
+import json
 import math
 import os
 import re
@@ -384,6 +385,102 @@ def save_config(api_key: str, assistant_name: str,
 
 
 # ----------------------------------------------------------------------------
+# Long-term memory (user name + facts the user asked to remember)
+# ----------------------------------------------------------------------------
+
+MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "memory.json")
+
+
+def load_memory() -> dict:
+    """Load the user's memory (name + remembered facts) from memory.json."""
+    try:
+        with open(MEMORY_FILE, encoding="utf-8") as file:
+            data = json.load(file)
+        return {
+            "user_name": str(data.get("user_name", "")),
+            "facts": [str(f) for f in data.get("facts", [])],
+        }
+    except (OSError, ValueError):
+        return {"user_name": "", "facts": []}
+
+
+def save_memory(memory: dict) -> None:
+    """Persist the user's memory to memory.json."""
+    try:
+        with open(MEMORY_FILE, "w", encoding="utf-8") as file:
+            json.dump({"user_name": memory.get("user_name", ""),
+                       "facts": list(memory.get("facts", []))},
+                      file, indent=2)
+    except OSError:
+        pass
+
+
+def parse_memory_command(text: str) -> tuple[str, str] | None:
+    """Parse memory commands exactly as spoken.
+
+    Returns (action, payload) with action one of:
+    set_name, remember, forget, forget_name, forget_all, recall_name, recall_all.
+    Returns None when the utterance is not a memory command.
+    """
+    s = text.strip()
+
+    # "my name is Ali" / "remember my name is Ali" / "call me Ali"
+    m = re.match(
+        r"^(?:please\s+)?(?:remember\s+(?:that\s+)?)?my name is (?P<name>.+)$",
+        s, flags=re.IGNORECASE)
+    if m:
+        return "set_name", m.group("name").strip(" .!?\"'")
+    m = re.match(
+        r"^(?:please\s+)?(?:(?:you\s+)?can\s+)?call me (?P<name>.+)$",
+        s, flags=re.IGNORECASE)
+    if m:
+        return "set_name", m.group("name").strip(" .!?\"'")
+
+    # "forget my name" / "forget that my name is ..."
+    if re.match(r"^forget\s+(?:that\s+)?my name\b.*$", s, flags=re.IGNORECASE):
+        return "forget_name", ""
+
+    # "forget everything" is handled by the generic forget below.
+    # "forget i like pizza" / "forget that i like pizza"
+    m = re.match(r"^forget\s+(?:that\s+)?(?P<fact>.+)$", s, flags=re.IGNORECASE)
+    if m:
+        fact = m.group("fact").strip(" .!?\"'")
+        if fact.lower() in ("everything", "all", "all my memories",
+                            "what you know", "what you know about me",
+                            "your memories", "memories"):
+            return "forget_all", ""
+        return "forget", fact
+
+    # "don't remember i like pizza" is a forget too
+    m = re.match(
+        r"^(?:do not|don't)\s+remember\s+(?:that\s+)?(?P<fact>.+)$",
+        s, flags=re.IGNORECASE)
+    if m:
+        return "forget", m.group("fact").strip(" .!?\"'")
+
+    # "what's my name" / "who am i"
+    if re.match(r"^(?:what(?:'s| is| s) my name|who am i|do you know my name)\??$",
+                s, flags=re.IGNORECASE):
+        return "recall_name", ""
+
+    # "what do you remember" / "what do you know about me" / "what are my memories"
+    if re.match(r"^(?:what do you (?:remember|know about me)"
+                r"|what are (?:my )?(?:your )?memories|what do you know)\??$",
+                s, flags=re.IGNORECASE):
+        return "recall_all", ""
+
+    # "remember (that) i like pizza" — keep the fact verbatim as spoken
+    m = re.match(
+        r"^(?:please\s+)?remember\s+(?:that\s+)?(?P<fact>.+)$",
+        s, flags=re.IGNORECASE)
+    if m:
+        return "remember", m.group("fact").strip(" .!?\"'")
+
+    return None
+
+
+# ----------------------------------------------------------------------------
 # The desktop app
 # ----------------------------------------------------------------------------
 
@@ -397,6 +494,7 @@ class VoiceAssistantApp:
         self.allowed_apps: dict[str, str] = dict(
             getattr(config, "ALLOWED_APPS", {}) or {}
         )
+        self.memory = load_memory()  # user name + remembered facts
         self.client = None
         self.chat = None
         self.tray_icon = None
@@ -632,12 +730,25 @@ class VoiceAssistantApp:
             return
         self.client = genai.Client(api_key=self.api_key)
         history = self.chat.get_history() if self.chat is not None else []
+        memory_notes = []
+        if self.memory.get("user_name"):
+            memory_notes.append(
+                f"- The user's name is {self.memory['user_name']}.")
+        for fact in self.memory.get("facts", []):
+            memory_notes.append(f"- Remembered about the user: {fact}.")
+        memory_block = ""
+        if memory_notes:
+            memory_block = (
+                "\n\nThings you remember about the user "
+                "(use them naturally in conversation; never recite this list):\n"
+                + "\n".join(memory_notes)
+            )
         self.chat = self.client.chats.create(
             model=GEMINI_MODEL,
             config=types.GenerateContentConfig(
                 system_instruction=(
                     f"You are {self.assistant_name}, a friendly voice assistant. "
-                    "Keep answers clear and conversational."
+                    "Keep answers clear and conversational." + memory_block
                 ),
             ),
             history=list(history),
@@ -881,8 +992,10 @@ class VoiceAssistantApp:
     # ----- Background workers ---------------------------------------------------
 
     def _greet(self) -> None:
+        user = self.memory.get("user_name")
+        hello = f"Hello, {user}!" if user else "Hello!"
         greeting = (
-            f"Hello! I'm {self.assistant_name}, your voice assistant. "
+            f"{hello} I'm {self.assistant_name}, your voice assistant. "
             f"Say 'Hey {self.assistant_name}' or '{self.assistant_name}' to talk, "
             "ask me anything, or say 'search for' to look something up. "
             "Say 'help' to hear what I can do."
@@ -973,8 +1086,69 @@ class VoiceAssistantApp:
         self._append_message("user", question)
         self._ask_worker(question)
 
+    def _apply_memory_command(self, action: str, payload: str) -> str:
+        """Apply a parsed memory command and reply about what changed."""
+        if action == "set_name":
+            name = payload.strip()
+            if not name:
+                return "I didn't catch a name. Say 'my name is' followed by your name."
+            self.memory["user_name"] = name
+            save_memory(self.memory)
+            self._configure_gemini()
+            return f"Got it — I'll call you {name}."
+        if action == "remember":
+            fact = payload.strip()
+            if not fact:
+                return "What should I remember? Say 'remember that' and then the fact."
+            if fact.lower() in {f.lower() for f in self.memory["facts"]}:
+                return "I already remember that."
+            self.memory["facts"].append(fact)
+            save_memory(self.memory)
+            self._configure_gemini()
+            return f"Okay, I'll remember that {fact}."
+        if action == "forget":
+            before = len(self.memory["facts"])
+            self.memory["facts"] = [
+                f for f in self.memory["facts"]
+                if payload.strip().lower() not in f.lower()
+            ]
+            save_memory(self.memory)
+            self._configure_gemini()
+            if len(self.memory["facts"]) < before:
+                return "Done — I forgot that."
+            return f"I don't have a memory matching '{payload}'."
+        if action == "forget_name":
+            self.memory["user_name"] = ""
+            save_memory(self.memory)
+            self._configure_gemini()
+            return "Okay, I forgot your name."
+        if action == "forget_all":
+            self.memory = {"user_name": "", "facts": []}
+            save_memory(self.memory)
+            self._configure_gemini()
+            return "Okay, I forgot everything."
+        if action == "recall_name":
+            if self.memory.get("user_name"):
+                return f"Your name is {self.memory['user_name']}."
+            return ("You haven't told me your name yet. "
+                    "Say 'my name is' followed by your name and I'll remember it.")
+        if action == "recall_all":
+            parts = []
+            if self.memory.get("user_name"):
+                parts.append(f"your name is {self.memory['user_name']}")
+            if self.memory.get("facts"):
+                parts.append("I also remember: " + "; ".join(self.memory["facts"]))
+            if not parts:
+                return ("I don't have any memories yet. "
+                        "Say 'remember that' followed by anything and I'll keep it.")
+            return "I remember that " + " and ".join(parts) + "."
+        return "I couldn't apply that memory command."
+
     def _local_command(self, question: str) -> str | None:
         """Handle built-in commands locally; return None to defer to Gemini."""
+        memory_cmd = parse_memory_command(question)
+        if memory_cmd is not None:
+            return self._apply_memory_command(*memory_cmd)
         q = question.lower().strip().strip(" .!?")
         if q in ("stop", "stop speaking", "be quiet", "quiet"):
             self._stop_speaking()
@@ -993,6 +1167,8 @@ class VoiceAssistantApp:
                 "You can ask me anything, say 'search for' to look something up, "
                 "'open' plus an app name to launch a program, 'what time is it', "
                 "'clear chat', 'repeat that', or 'stop' to silence me. "
+                "Tell me 'my name is' or 'remember that' and I'll keep it in "
+                "memory — ask 'what do you remember' to hear it back. "
                 f"Just say 'Hey {self.assistant_name}' to start."
             )
         if q in ("repeat", "repeat that", "say that again", "come again"):
