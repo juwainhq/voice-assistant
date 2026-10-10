@@ -89,11 +89,15 @@ SPEEDS = {0: "slow", 1: "normal", 2: "fast"}
 FAST_RATE = 1.35  # playback rate for the "fast" voice speed
 STOP_RED = "#FF4444"  # mic button background while speaking (click to stop)
 
-# Avatar choices: the default animates the supplied portrait art. Set
-# USE_IMAGE_AVATAR=True for the old still-image view, or AVATAR_STYLE="grokbot"
-# to bring back the original animated Grok Bot face.
-USE_IMAGE_AVATAR = False
-AVATAR_STYLE = "portrait"  # "portrait" or "grokbot" (when image mode is off)
+# Avatar choices are selectable in Settings and saved as config.AVATAR_MODE.
+# These legacy values define the default for older config.py files without it.
+AVATAR_MODE_PORTRAIT = "portrait"
+AVATAR_MODE_GROKBOT = "grokbot"
+AVATAR_MODE_IMAGE = "image"
+AVATAR_MODES = (AVATAR_MODE_PORTRAIT, AVATAR_MODE_GROKBOT, AVATAR_MODE_IMAGE)
+USE_IMAGE_AVATAR = False  # legacy default selector; Settings is the normal control
+AVATAR_STYLE = "portrait"  # legacy default selector: "portrait" or "grokbot"
+DEFAULT_AVATAR_MODE = (AVATAR_MODE_IMAGE if USE_IMAGE_AVATAR else AVATAR_STYLE)
 AVATAR_FILE = "avatar.png"  # supplied portrait artwork, same folder as main.py
 
 # Wake-word listener (shares the single mic stream with question recording)
@@ -450,7 +454,8 @@ def duckduckgo_search(query: str, max_results: int = 5) -> str:
 def save_config(api_key: str, assistant_name: str,
                 allowed_apps: dict | None = None,
                 ai_provider: str | None = None,
-                ollama_model: str | None = None) -> None:
+                ollama_model: str | None = None,
+                avatar_mode: str | None = None) -> None:
     """Persist the settings back to config.py."""
     apps = allowed_apps if allowed_apps is not None else {}
     provider = ai_provider or getattr(config, "AI_PROVIDER", AI_PROVIDER_GEMINI)
@@ -460,6 +465,9 @@ def save_config(api_key: str, assistant_name: str,
                                      DEFAULT_OLLAMA_MODEL)).strip()
     if not model:
         model = DEFAULT_OLLAMA_MODEL
+    mode = avatar_mode or getattr(config, "AVATAR_MODE", DEFAULT_AVATAR_MODE)
+    if mode not in AVATAR_MODES:
+        mode = DEFAULT_AVATAR_MODE
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
     content = (
         '"""Configuration settings for the voice assistant."""\n\n'
@@ -471,6 +479,8 @@ def save_config(api_key: str, assistant_name: str,
         f"AI_PROVIDER = {provider!r}\n\n"
         "# Ollama model name (download with: ollama pull <model>).\n"
         f"OLLAMA_MODEL = {model!r}\n\n"
+        "# Desktop avatar: 'portrait', 'grokbot', or 'image'.\n"
+        f"AVATAR_MODE = {mode!r}\n\n"
         "# Name the assistant introduces itself with (editable in the app's Settings).\n"
         f"ASSISTANT_NAME = {assistant_name!r}\n\n"
         "# Apps the assistant may open with 'open [app name]'.\n"
@@ -1044,6 +1054,11 @@ class VoiceAssistantApp:
         ).strip()
         if not self.ollama_model:
             self.ollama_model = DEFAULT_OLLAMA_MODEL
+        self.avatar_mode = str(
+            getattr(config, "AVATAR_MODE", DEFAULT_AVATAR_MODE)
+        ).lower()
+        if self.avatar_mode not in AVATAR_MODES:
+            self.avatar_mode = DEFAULT_AVATAR_MODE
         self.assistant_name = getattr(config, "ASSISTANT_NAME", DEFAULT_ASSISTANT_NAME)
         self.allowed_apps: dict[str, str] = dict(
             getattr(config, "ALLOWED_APPS", {}) or {}
@@ -1109,25 +1124,8 @@ class VoiceAssistantApp:
         # Header: avatar + name on the left; status dot + gear on the right.
         header = tk.Frame(self.root, bg=BG)
         header.pack(fill=tk.X, padx=18, pady=(12, 8))
-        self.face = None
-        if USE_IMAGE_AVATAR:
-            # Kept as a one-line switch if the user wants the original still.
-            candidate = AvatarView(header, size=64)
-        elif AVATAR_STYLE == "grokbot":
-            # Original animated Grok Bot remains available for easy rollback.
-            self.face = BubblyFace(header, size=48)
-            candidate = None
-        else:
-            # Default: their portrait art, brought to life with blinks, gaze,
-            # expressions, and a mouth that moves with the speaking state.
-            candidate = AnimatedReferenceAvatar(header, size=64)
-        if candidate is not None:
-            if candidate.ok:
-                self.face = candidate
-            else:
-                candidate.destroy()
-        if self.face is None:  # missing/unusable artwork -> classic animation
-            self.face = BubblyFace(header, size=48)
+        self._avatar_header = header
+        self.face = self._make_avatar_widget(header, self.avatar_mode)
         self.face.pack(side=tk.LEFT, padx=(0, 12))
         title_box = tk.Frame(header, bg=BG)
         title_box.pack(side=tk.LEFT)
@@ -1224,6 +1222,30 @@ class VoiceAssistantApp:
         )
         self.status_label.pack(fill=tk.X, pady=(6, 0))
 
+    def _make_avatar_widget(self, parent, mode: str):
+        """Build one of the three selectable header avatars."""
+        if mode == AVATAR_MODE_GROKBOT:
+            return BubblyFace(parent, size=48)
+        if mode == AVATAR_MODE_IMAGE:
+            candidate = AvatarView(parent, size=64)
+        else:
+            candidate = AnimatedReferenceAvatar(parent, size=64)
+        if candidate.ok:
+            return candidate
+        candidate.destroy()
+        return BubblyFace(parent, size=48)
+
+    def _switch_avatar(self, mode: str) -> None:
+        """Replace the header avatar while retaining its current expression."""
+        if mode not in AVATAR_MODES:
+            mode = DEFAULT_AVATAR_MODE
+        emotion = getattr(self.face, "emotion", "idle")
+        self.face.destroy()
+        self.avatar_mode = mode
+        self.face = self._make_avatar_widget(self._avatar_header, mode)
+        self.face.set_emotion(emotion)
+        self.face.pack(side=tk.LEFT, padx=(0, 12))
+
     def _open_settings(self) -> None:
         """Open the settings popup (the gear button in the header)."""
         if self._settings_win is not None and self._settings_win.winfo_exists():
@@ -1260,6 +1282,21 @@ class VoiceAssistantApp:
         _label("ASSISTANT NAME")
         self.name_entry = _entry()
         self.name_entry.insert(0, self.assistant_name)
+
+        _label("AVATAR")
+        self._avatar_mode_var = tk.StringVar(value=self.avatar_mode)
+        avatar_row = tk.Frame(body, bg=BG)
+        avatar_row.pack(fill=tk.X, pady=(4, 0))
+        for text, value in (("Animated portrait", AVATAR_MODE_PORTRAIT),
+                            ("Classic Grok Bot", AVATAR_MODE_GROKBOT),
+                            ("Static image", AVATAR_MODE_IMAGE)):
+            tk.Radiobutton(
+                avatar_row, text=text, value=value,
+                variable=self._avatar_mode_var, bg=BG, fg=TEXT,
+                selectcolor=GRAY, activebackground=BG,
+                activeforeground=WHITE, highlightthickness=0, borderwidth=0,
+                font=("Segoe UI", 8),
+            ).pack(side=tk.LEFT, expand=True, anchor="w")
 
         _label("AI PROVIDER")
         self._ai_provider_var = tk.StringVar(value=self.ai_provider)
@@ -1689,9 +1726,13 @@ class VoiceAssistantApp:
         self.ollama_model = (
             self.ollama_model_entry.get().strip() or DEFAULT_OLLAMA_MODEL
         )
+        selected_avatar = self._avatar_mode_var.get()
+        self.avatar_mode = (selected_avatar if selected_avatar in AVATAR_MODES
+                            else DEFAULT_AVATAR_MODE)
         save_config(self.api_key, self.assistant_name, self.allowed_apps,
-                    self.ai_provider, self.ollama_model)
+                    self.ai_provider, self.ollama_model, self.avatar_mode)
         self._configure_ai()
+        self._switch_avatar(self.avatar_mode)
         self.title_label.config(text=self.assistant_name)
         self.root.title(f"{self.assistant_name} — Voice Assistant")
         self._set_status("Settings saved.")
@@ -1726,7 +1767,7 @@ class VoiceAssistantApp:
             return
         self.allowed_apps[name] = path
         save_config(self.api_key, self.assistant_name, self.allowed_apps,
-                    self.ai_provider, self.ollama_model)
+                    self.ai_provider, self.ollama_model, self.avatar_mode)
         self._refresh_apps_list()
         self._set_status(f"Added '{name}' to Allowed Apps.")
 
@@ -1738,7 +1779,7 @@ class VoiceAssistantApp:
         name = self.apps_list.get(selection[0])
         self.allowed_apps.pop(name, None)
         save_config(self.api_key, self.assistant_name, self.allowed_apps,
-                    self.ai_provider, self.ollama_model)
+                    self.ai_provider, self.ollama_model, self.avatar_mode)
         self._refresh_apps_list()
         self._set_status(f"Removed '{name}' from Allowed Apps.")
 

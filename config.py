@@ -11,5 +11,8 @@ AI_PROVIDER = "gemini"
 # Local Ollama model (download with: ollama pull phi3:mini).
 OLLAMA_MODEL = "phi3:mini"
 
+# Desktop avatar selected in Settings: portrait, grokbot, or image.
+AVATAR_MODE = "portrait"
+
 # Name the assistant introduces itself with (editable in the app's Settings).
 ASSISTANT_NAME = "Nova"

@@ -175,6 +175,8 @@ def save_config(api_key: str, assistant_name: str,
         "AI_PROVIDER", getattr(config, "AI_PROVIDER", "gemini"))
     model = existing_setting(
         "OLLAMA_MODEL", getattr(config, "OLLAMA_MODEL", "phi3:mini"))
+    avatar_mode = existing_setting(
+        "AVATAR_MODE", getattr(config, "AVATAR_MODE", "portrait"))
     content = (
         '"""Configuration settings for the voice assistant."""\n\n'
         "# Get your Gemini API key from Google AI Studio: "
@@ -185,6 +187,8 @@ def save_config(api_key: str, assistant_name: str,
         f"AI_PROVIDER = {provider!r}\n\n"
         "# Ollama model name configured in the desktop app.\n"
         f"OLLAMA_MODEL = {model!r}\n\n"
+        "# Desktop avatar selected in Settings: portrait, grokbot, or image.\n"
+        f"AVATAR_MODE = {avatar_mode!r}\n\n"
         "# Name the assistant introduces itself with "
         "(editable in the app's Settings).\n"
         f"ASSISTANT_NAME = {assistant_name!r}\n\n"

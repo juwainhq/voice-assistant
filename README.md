@@ -88,13 +88,13 @@ The desktop avatar now uses the supplied `avatar.png` as its character design,
 not as a still display: the eyes blink naturally, their catchlights shift with
 its gaze, the face breathes subtly, and the mouth smiles or opens/closes while
 Nova speaks. Listening shows an animated sound wave; thinking shows animated dots.
-The earlier still-image version remains available with `USE_IMAGE_AVATAR = True`,
-and the original animated Grok Bot remains available with `AVATAR_STYLE = "grokbot"`.
+Choose **Animated portrait**, **Classic Grok Bot**, or **Static image** in the
+Settings modal; the selection is saved to `config.py` and applied to the header.
 
 ### Mobile and classic Grok Bot
 
 The mobile PWA keeps its existing animated Grok Bot SVG. The classic desktop
-`BubblyFace` is also retained in `main.py` as a switchable alternative.
+`BubblyFace` remains selectable from the avatar options in Settings.
 
 ---
 
@@ -139,10 +139,11 @@ typing always works.
 - **Memory** — names and facts persist in `memory.json` between sessions.
 - **Web search** — "search for …" answers with DuckDuckGo context and sources.
 - **App launcher** — "open [app]" runs programs from your Allowed Apps list.
-- **Settings** — choose **Gemini API** or **Local AI (Ollama)**. Gemini uses an API
-  key; Ollama uses a configurable model (default `phi3:mini`). Ollama failures fall
-  back to Gemini with a chat notice. Provider, model, assistant name, voice speed and
-  Allowed Apps are saved to `config.py`.
+- **Settings** — choose an avatar (**Animated portrait**, **Classic Grok Bot**, or
+  **Static image**) and an AI provider (**Gemini API** or **Local AI (Ollama)**).
+  Gemini uses an API key; Ollama uses a configurable model (default `phi3:mini`).
+  Ollama failures fall back to Gemini with a chat notice. These settings, the
+  assistant name, voice speed and Allowed Apps are saved to `config.py`.
 - **Tray icon** — closing the desktop window keeps Nova running in the background.
 - **Mobile PWA** — same assistant in your pocket over local Wi-Fi.
 
@@ -172,7 +173,7 @@ typing always works.
 | `main.py` | Desktop app (tkinter, mic, TTS, wake listener, tray) |
 | `mobile_server.py` | Mobile web server + shared assistant brain |
 | `web/` | Phone web app (PWA: HTML/JS/CSS, manifest, service worker) |
-| `config.py` | `GEMINI_API_KEY`, `AI_PROVIDER`, `OLLAMA_MODEL`, `ASSISTANT_NAME`, `ALLOWED_APPS` |
+| `config.py` | `GEMINI_API_KEY`, `AI_PROVIDER`, `OLLAMA_MODEL`, `AVATAR_MODE`, `ASSISTANT_NAME`, `ALLOWED_APPS` |
 | `avatar.png` | User-provided portrait artwork used by the animated desktop avatar |
 | `memory.json` | Long-term memory (auto-created, gitignored) |
 | `requirements.txt` | Python dependencies |
@@ -184,11 +185,10 @@ typing always works.
 
 > Every change to this project is recorded here as key points, newest first.
 
-**2026-10-10 — Animated desktop portrait based on the supplied avatar design**
-- The default header avatar now uses the supplied `avatar.png` as its design reference and animates it: natural blinking/closed eyelids, shifting eye catchlights, subtle breathing, changing smiles, and an open/close speaking mouth.
-- Listening and thinking keep their animated wave/dot indicators; the avatar changes expression through idle, happy, sad, thinking, listening, and talking states.
-- The old still-image mode remains selectable with `USE_IMAGE_AVATAR = True`; the previous animated Grok Bot remains selectable with `AVATAR_STYLE = "grokbot"`. Missing artwork still falls back to the classic animated face.
-- No image upload was altered; the submitted artwork remains in `avatar.jpg`/`avatar.png`. Mobile keeps its existing animated Grok Bot SVG.
+**2026-10-10 — Avatar selector in Settings**
+- Added three Settings choices: **Animated portrait** (the supplied reference artwork, with natural blinks, moving eye glints, expressions, and a speaking mouth), **Classic Grok Bot**, and **Static image**.
+- Changing the selection and pressing **Save settings** immediately swaps the header avatar; the chosen mode persists in `config.py` as `AVATAR_MODE` across restarts.
+- Missing reference artwork safely falls back to the classic animated face. The uploaded `avatar.jpg`/`avatar.png` is unchanged; the mobile PWA keeps its existing animated Grok Bot SVG.
 
 
 **2026-10-10 — Desktop Local AI option (Ollama) with Gemini fallback**
