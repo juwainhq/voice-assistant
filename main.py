@@ -98,7 +98,7 @@ AVATAR_MODES = (AVATAR_MODE_PORTRAIT, AVATAR_MODE_GROKBOT, AVATAR_MODE_IMAGE)
 USE_IMAGE_AVATAR = False  # legacy default selector; Settings is the normal control
 AVATAR_STYLE = "portrait"  # legacy default selector: "portrait" or "grokbot"
 DEFAULT_AVATAR_MODE = (AVATAR_MODE_IMAGE if USE_IMAGE_AVATAR else AVATAR_STYLE)
-AVATAR_FILE = "avatar.png"  # supplied portrait artwork, same folder as main.py
+AVATAR_FILE = "avatar.png"  # reference artwork and optional still avatar
 
 # Wake-word listener (shares the single mic stream with question recording)
 WAKE_CHECK_SECONDS = 2.0  # how often the rolling wake buffer is transcribed
@@ -761,8 +761,8 @@ def _load_avatar_photo(size: int):
 class AvatarView(tk.Frame):
     """Optional still-image version with animated state indicators.
 
-    The default is AnimatedReferenceAvatar, which brings the same artwork to
-    life with blinking, eye movement, facial expressions, and a speaking mouth.
+    The default is AnimatedReferenceAvatar, a mouthless redraw of the supplied
+    design with animated eyes, brows, body movement, and state indicators.
     Set USE_IMAGE_AVATAR=True to use this original still-image view instead;
     set AVATAR_STYLE="grokbot" to use the earlier animated Grok Bot.
     """
@@ -837,21 +837,27 @@ class AvatarView(tk.Frame):
         self.after(self.FRAME_MS, self._tick)
 
 
-class AnimatedReferenceAvatar(tk.Canvas):
-    """Animated portrait based on the supplied avatar art.
+class AnimatedReferenceAvatar(tk.Label):
+    """A fully drawn, mouthless animated portrait matching the supplied art.
 
-    Keeps the reference illustration as the character's design, then layers
-    expressive blinks, moving eye glints, a speaking mouth, and small listening
-    / thinking indicators over it. This makes the portrait feel alive without
-    replacing the user's artwork with a different character.
+    The bitmap is only a design reference. This renderer draws the character
+    itself (swept dark hair, tilted peach face, thick brows, capsule eyes,
+    catchlights, blush, ear, neck, and shoulders) and animates its gaze,
+    blinks, expression, and subtle upper-body breathing.
     """
 
     FRAME_MS = 80
-    LID_SKIN = "#FDEAE0"
-    LID_LINE = "#6B4945"
-    EYE_INK = "#2A1E1C"
-    MOUTH_INK = "#61343A"
-    MOUTH_TONGUE = "#E88B92"
+    SUPERSAMPLE = 4
+    BG_COLOR = "#201E21"
+    HAIR = "#402E2A"
+    HAIR_DARK = "#302321"
+    HAIR_MID = "#432F2B"
+    SKIN = "#FDEBE1"
+    SKIN_SHADE = "#F5D2C7"
+    BLUSH = "#F7C8C6"
+    EYE_INK = "#241A1A"
+    EYE_GLINT = "#FFF9F3"
+    BROW = "#3A2826"
     WAVE_FRAMES = (
         (0.35, 0.85, 0.50, 1.00, 0.45),
         (0.85, 0.45, 1.00, 0.40, 0.80),
@@ -860,28 +866,275 @@ class AnimatedReferenceAvatar(tk.Canvas):
     )
 
     def __init__(self, parent, size: int = 64, **kwargs) -> None:
-        super().__init__(parent, width=size, height=size, bg="#222022",
-                         highlightthickness=0, borderwidth=0, **kwargs)
+        super().__init__(parent, width=size, height=size, bg=self.BG_COLOR,
+                         borderwidth=0, highlightthickness=0, **kwargs)
         self.size = size
         self.emotion = "idle"
-        self.ok = False
+        self.ok = Image is not None and ImageDraw is not None and ImageTk is not None
         self._time = 0.0
         self._frame = 0
         self._blink_left = 0.0
-        self._blink_in = 2.8 + random.random() * 2.2
-        self._photo = _load_avatar_photo(size)
-        if self._photo is None:
-            return  # caller falls back to the classic drawn face
-        self.ok = True
-        self._image_item = self.create_image(
-            size / 2, size / 2, image=self._photo, anchor="center")
+        self._blink_in = 2.7 + random.random() * 2.2
+        self._photo = None
+        if not self.ok:
+            return
         self._render()
         self.after(self.FRAME_MS, self._tick)
 
     def set_emotion(self, emotion: str) -> None:
-        """Set one of the app's normal avatar states."""
+        """Change expression using eyes, brows, and body pose only."""
         if emotion in ("idle", "happy", "listening", "thinking", "talking", "sad"):
             self.emotion = emotion
+
+    @staticmethod
+    def _bezier(start, segments, steps=18):
+        """Sample cubic curves into a smooth path in 100-unit design space."""
+        points = [start]
+        x0, y0 = start
+        for c1, c2, end in segments:
+            x1, y1 = c1
+            x2, y2 = c2
+            x3, y3 = end
+            for index in range(1, steps + 1):
+                t = index / steps
+                u = 1.0 - t
+                x = (u ** 3 * x0 + 3 * u * u * t * x1
+                     + 3 * u * t * t * x2 + t ** 3 * x3)
+                y = (u ** 3 * y0 + 3 * u * u * t * y1
+                     + 3 * u * t * t * y2 + t ** 3 * y3)
+                points.append((x, y))
+            x0, y0 = x3, y3
+        return points
+
+    @staticmethod
+    def _oval_points(cx, cy, rx, ry, angle=0.0, count=36):
+        """Return a rotated oval polygon in the same design coordinate space."""
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        points = []
+        for index in range(count):
+            theta = 2 * math.pi * index / count
+            x, y = rx * math.cos(theta), ry * math.sin(theta)
+            points.append((cx + x * cos_a - y * sin_a,
+                           cy + x * sin_a + y * cos_a))
+        return points
+
+    def _render_frame(self):
+        """Draw the reference-inspired character from shapes, not the bitmap."""
+        if not self.ok:
+            return None
+        ss = self.SUPERSAMPLE
+        scale = self.size * ss / 100.0
+        frame = Image.new("RGB", (self.size * ss, self.size * ss), self.BG_COLOR)
+        draw = ImageDraw.Draw(frame)
+        emotion = self.emotion
+        breath = math.sin(self._time * 1.7) * 2.0
+        sway = math.sin(self._time * 1.05) * 0.7
+        head_y = -breath * 0.24
+        body_y = breath * 1.1
+        if emotion == "listening":
+            head_y -= 0.55
+        elif emotion == "thinking":
+            head_y += 0.22
+        head_x = sway + (-0.32 if emotion == "listening" else 0.0)
+
+        def scaled(points, dx=0.0, dy=0.0):
+            return [((x + dx) * scale, (y + dy) * scale) for x, y in points]
+
+        def fill_path(start, segments, color, dx=0.0, dy=0.0, steps=18):
+            points = self._bezier(start, segments, steps)
+            draw.polygon(scaled(points, dx, dy), fill=color)
+
+        def fill_oval(box, color):
+            x0, y0, x1, y1 = box
+            draw.ellipse((x0 * scale, y0 * scale, x1 * scale, y1 * scale),
+                         fill=color)
+
+        def stroke_path(start, segments, color, width, dx=0.0, dy=0.0):
+            points = scaled(self._bezier(start, segments), dx, dy)
+            px_width = max(1, round(width * scale))
+            draw.line(points, fill=color, width=px_width, joint="curve")
+            radius = px_width / 2
+            for x, y in (points[0], points[-1]):
+                draw.ellipse((x-radius, y-radius, x+radius, y+radius), fill=color)
+
+        def paint_oval(cx, cy, rx, ry, color, angle=0.0, dx=0.0, dy=0.0):
+            points = self._oval_points(cx + dx, cy + dy, rx, ry, angle)
+            draw.polygon(scaled(points), fill=color)
+
+        # Back hair fills the silhouette and continues around the shoulders.
+        fill_oval((-12 + head_x, -20 + head_y, 111 + head_x, 111 + head_y),
+                  self.HAIR)
+        fill_path(
+            (66, 14),
+            [((83, 17), (91, 31), (90, 47)),
+             ((89, 64), (79, 81), (75, 101)),
+             ((67, 103), (60, 98), (56, 93)),
+             ((65, 77), (72, 61), (75, 48)),
+             ((77, 34), (72, 22), (66, 14))],
+            self.HAIR_DARK, head_x * 0.35, head_y,
+        )
+
+        # Shoulders and upper torso move gently as the character breathes.
+        fill_path(
+            (12, 103),
+            [((15, 93), (23, 88), (31, 88)),
+             ((38, 88), (43, 94), (49, 91)),
+             ((60, 86), (73, 91), (82, 103)),
+             ((61, 108), (32, 108), (12, 103))],
+            "#2A282C", sway * 0.45, body_y,
+        )
+        fill_path(
+            (31, 74),
+            [((37, 78), (49, 80), (57, 75)),
+             ((55, 86), (57, 96), (63, 103)),
+             ((48, 105), (32, 104), (23, 103)),
+             ((30, 93), (31, 83), (31, 74))],
+            self.SKIN_SHADE, head_x * 0.2, body_y * 0.75,
+        )
+        # Right ear, then the softly tilted face.
+        paint_oval(72, 65, 9.0, 10.5, self.SKIN_SHADE,
+                   angle=-0.12, dx=head_x, dy=head_y)
+        paint_oval(74, 65, 3.1, 5.0, "#EAB8AE",
+                   angle=-0.12, dx=head_x, dy=head_y)
+        fill_path(
+            (39, 26),
+            [((53, 23), (66, 30), (71, 42)),
+             ((76, 54), (72, 68), (64, 78)),
+             ((57, 87), (48, 91), (38, 90)),
+             ((25, 89), (15, 81), (10, 71)),
+             ((5, 60), (7, 47), (13, 38)),
+             ((20, 29), (30, 25), (39, 26))],
+            self.SKIN, head_x, head_y,
+        )
+
+        # Long side locks and the sweeping fringe reproduce the reference hair.
+        fill_path(
+            (-4, 38),
+            [((7, 40), (14, 48), (15, 59)),
+             ((17, 74), (11, 88), (15, 103)),
+             ((8, 104), (1, 102), (-4, 99)),
+             ((-2, 78), (-2, 55), (-4, 38))],
+            self.HAIR_DARK, head_x * 0.75, head_y,
+        )
+        fill_path(
+            (-4, 43),
+            [((0, 26), (6, 12), (19, 4)),
+             ((32, -4), (49, -3), (61, 4)),
+             ((73, 10), (80, 22), (80, 34)),
+             ((81, 41), (78, 47), (74, 50)),
+             ((68, 42), (62, 37), (55, 34)),
+             ((47, 30), (39, 31), (32, 35)),
+             ((24, 40), (20, 47), (16, 55)),
+             ((11, 63), (4, 68), (-4, 68))],
+            self.HAIR_MID, head_x, head_y,
+        )
+        # Swept shadow in the bangs; deliberately no shine streak.
+        fill_path(
+            (-4, 40),
+            [((7, 32), (16, 25), (27, 23)),
+             ((40, 19), (53, 21), (63, 28)),
+             ((51, 25), (40, 27), (31, 33)),
+             ((23, 38), (18, 45), (14, 53)),
+             ((10, 59), (4, 63), (-4, 63))],
+            self.HAIR_DARK, head_x, head_y,
+        )
+
+        # Expression is carried only by brows, eyes, catchlights, and blush.
+        brow_raise = -1.6 if emotion == "listening" else 0.0
+        if emotion == "sad":
+            left_brow = ((15, 44), [((21, 41), (27, 37), (34, 38))])
+            right_brow = ((52, 47), [((59, 49), (66, 54), (71, 58))])
+        elif emotion == "thinking":
+            left_brow = ((15, 42), [((21, 39), (28, 39), (34, 42))])
+            right_brow = ((52, 48), [((59, 48), (66, 51), (71, 55))])
+        else:
+            left_brow = ((15, 42), [((21, 39), (28, 40), (34, 44))])
+            right_brow = ((52, 49), [((59, 50), (66, 53), (71, 57))])
+        stroke_path(*left_brow, self.BROW, 3.3, head_x, head_y + brow_raise)
+        stroke_path(*right_brow, self.BROW, 3.3, head_x, head_y + brow_raise)
+
+        blush_color = ("#F5B9B9" if emotion == "happy" else
+                       "#F3D1CE" if emotion == "sad" else self.BLUSH)
+        paint_oval(15.5, 63.0, 6.0, 3.7, blush_color, angle=0.24,
+                   dx=head_x, dy=head_y)
+        paint_oval(62.5, 72.0, 6.5, 3.7, blush_color, angle=0.20,
+                   dx=head_x, dy=head_y)
+
+        # The reference has large dark, slightly tilted capsule eyes with slim glints.
+        gaze_x = 0.0
+        gaze_y = 0.0
+        if emotion == "thinking":
+            gaze_x, gaze_y = 1.3, -1.35
+        elif emotion == "sad":
+            gaze_y = 1.0
+        elif emotion == "listening":
+            gaze_x = math.sin(self._time * 2.0) * 0.28
+        elif emotion == "talking":
+            gaze_x = math.sin(self._time * 3.2) * 0.35
+        else:
+            gaze_x = math.sin(self._time * 0.75) * 0.30
+            gaze_y = math.sin(self._time * 0.55) * 0.20
+
+        eyes = ((24.0, 54.5, -0.16), (58.0, 64.0, 0.16))
+        closed = self._blink_left > 0 or emotion == "happy"
+        for index, (cx, cy, angle) in enumerate(eyes):
+            ex, ey = cx + gaze_x + head_x, cy + gaze_y + head_y
+            if closed:
+                lid_y = ey + (0.4 if emotion == "happy" else 0.0)
+                stroke_path((ex - 6.0, lid_y),
+                            [((ex - 2.5, lid_y + 1.2),
+                              (ex + 2.5, lid_y + 1.2),
+                              (ex + 6.0, lid_y))],
+                            self.EYE_INK, 2.4 if emotion == "happy" else 2.0)
+                continue
+            eye_height = 9.5
+            eye_width = 5.35
+            if emotion == "listening":
+                eye_height *= 1.14
+            elif emotion == "sad":
+                eye_height *= 0.78
+            eye_points = self._oval_points(ex, ey, eye_width, eye_height,
+                                           angle=angle, count=40)
+            draw.polygon(scaled(eye_points), fill=self.EYE_INK)
+            glint_dx = -1.35 + (0.18 if emotion == "thinking" else 0.0)
+            glint_dy = -3.1 + (0.20 * math.sin(self._time * 2.3))
+            paint_oval(ex + glint_dx, ey + glint_dy, 1.05, 2.65,
+                       self.EYE_GLINT, angle=angle)
+
+        # Speech remains mouthless: a compact sound wave animates while talking.
+        if emotion in ("listening", "thinking", "talking"):
+            if emotion in ("listening", "talking"):
+                pattern = self.WAVE_FRAMES[self._frame % len(self.WAVE_FRAMES)]
+                mid, half = 91 * scale, 5.0 * scale
+                bar_w = 2.1 * scale
+                for index, height in enumerate(pattern):
+                    x = (80.0 + index * 3.7) * scale
+                    top = mid - height * half
+                    bottom = mid + height * half
+                    draw.rounded_rectangle(
+                        (x, top, x + bar_w, bottom),
+                        radius=bar_w / 2, fill="#FAFAFA",
+                    )
+            else:
+                active = self._frame % 3
+                for index in range(3):
+                    x = (83 + index * 5) * scale
+                    r = (1.15 if active == index else 0.75) * scale
+                    cy = 91 * scale
+                    fill_oval((x-r, cy-r, x+r, cy+r),
+                              "#FAFAFA" if active == index else "#8C8C8C")
+
+        resampling = (Image.Resampling.LANCZOS if hasattr(Image, "Resampling")
+                      else Image.LANCZOS)
+        return frame.resize((self.size, self.size), resampling)
+
+    def _render(self) -> None:
+        frame = self._render_frame()
+        if frame is None:
+            return
+        photo = ImageTk.PhotoImage(frame, master=self)
+        self.configure(image=photo)
+        self._photo = photo
 
     def _tick(self) -> None:
         dt = self.FRAME_MS / 1000.0
@@ -893,146 +1146,11 @@ class AnimatedReferenceAvatar(tk.Canvas):
             self._blink_in -= dt
             if self._blink_in <= 0:
                 self._blink_left = 0.16
-                self._blink_in = 2.8 + random.random() * 2.4
+                self._blink_in = 2.7 + random.random() * 2.5
         self._render()
         self.after(self.FRAME_MS, self._tick)
 
-    def _render(self) -> None:
-        """Redraw only the animated facial features above the reference art."""
-        scale = self.size / 64.0
-        breath = math.sin(self._time * 1.4) * 0.28 * scale
-        center = self.size / 2
-        self.coords(self._image_item, center, center + breath)
-        self.delete("motion")
-        if self._blink_left > 0:
-            self._draw_closed_eyes(scale, breath)
-        else:
-            self._draw_eye_glints(scale, breath)
-        self._draw_mouth(scale, breath)
-        self._draw_state_indicator(scale)
 
-    def _draw_eye_glints(self, scale: float, breath: float) -> None:
-        """Move the portrait's eye highlights slightly to animate its gaze."""
-        if self.emotion == "thinking":
-            gaze_x = 0.75 + math.sin(self._time * 1.2) * 0.16
-            gaze_y = -0.65
-        elif self.emotion == "listening":
-            gaze_x = math.sin(self._time * 2.4) * 0.28
-            gaze_y = math.sin(self._time * 2.0) * 0.18
-        elif self.emotion == "talking":
-            gaze_x = math.sin(self._time * 3.0) * 0.30
-            gaze_y = 0.10
-        else:
-            gaze_x = math.sin(self._time * 0.7) * 0.24
-            gaze_y = math.sin(self._time * 0.55) * 0.16
-
-        # The source illustration has one slim white catchlight in each eye.
-        for x, y in ((14.35, 32.0), (35.65, 38.75)):
-            px, py = x * scale, y * scale + breath
-            self.create_oval(
-                px - 0.95 * scale, py - 2.15 * scale,
-                px + 0.95 * scale, py + 2.15 * scale,
-                fill=self.EYE_INK, outline="", tags="motion",
-            )
-            gx, gy = px + gaze_x * scale, py + gaze_y * scale
-            self.create_oval(
-                gx - 0.62 * scale, gy - 1.62 * scale,
-                gx + 0.62 * scale, gy + 1.62 * scale,
-                fill=WHITE, outline="", tags="motion",
-            )
-
-    def _draw_closed_eyes(self, scale: float, breath: float) -> None:
-        """Cover the open eyes during a blink and draw soft closed lids."""
-        eyes = ((15.3, 34.2, 4.5, 5.8), (37.4, 40.3, 4.7, 5.7))
-        for x, y, rx, ry in eyes:
-            cx, cy = x * scale, y * scale + breath
-            self.create_oval(
-                cx - rx * scale, cy - ry * scale,
-                cx + rx * scale, cy + ry * scale,
-                fill=self.LID_SKIN, outline=self.LID_SKIN, tags="motion",
-            )
-            self.create_line(
-                cx - 3.0 * scale, cy + 0.15 * scale,
-                cx, cy + 1.15 * scale,
-                cx + 3.0 * scale, cy + 0.15 * scale,
-                fill=self.LID_LINE, width=max(1, 0.9 * scale),
-                smooth=True, splinesteps=8, capstyle=tk.ROUND, tags="motion",
-            )
-
-    def _draw_mouth(self, scale: float, breath: float) -> None:
-        """Keep the reference face mouthless at rest; animate it in speech."""
-        if self.emotion not in ("talking", "happy", "sad"):
-            return
-        cx, cy = 31.5 * scale, 50.8 * scale + breath
-        if self.emotion == "talking":
-            opening = abs(math.sin(self._time * 10.5))
-            if opening > 0.23:
-                rx = (1.55 + opening * 1.10) * scale
-                ry = (0.75 + opening * 1.75) * scale
-                self.create_oval(
-                    cx - rx, cy - ry, cx + rx, cy + ry,
-                    fill=self.MOUTH_INK, outline="#542D31",
-                    width=max(1, 0.45 * scale), tags="motion",
-                )
-                if opening > 0.60:
-                    self.create_oval(
-                        cx - 0.95 * scale, cy + 0.35 * scale,
-                        cx + 0.95 * scale, cy + 1.55 * scale,
-                        fill=self.MOUTH_TONGUE, outline="", tags="motion",
-                    )
-                return
-            points = (cx - 2.7 * scale, cy - 0.1 * scale,
-                      cx, cy + 1.2 * scale,
-                      cx + 2.7 * scale, cy - 0.1 * scale)
-        elif self.emotion == "sad":
-            points = (cx - 3.0 * scale, cy + 0.9 * scale,
-                      cx, cy - 0.5 * scale,
-                      cx + 3.0 * scale, cy + 0.9 * scale)
-        else:  # happy
-            points = (cx - 3.5 * scale, cy - 0.2 * scale,
-                      cx, cy + 2.0 * scale,
-                      cx + 3.5 * scale, cy - 0.2 * scale)
-        self.create_line(
-            *points, fill="#805751", width=max(1, 0.9 * scale),
-            smooth=True, splinesteps=8, capstyle=tk.ROUND, tags="motion",
-        )
-
-    def _draw_state_indicator(self, scale: float) -> None:
-        """Retain the tiny listening wave / thinking dots in the lower corner."""
-        if self.emotion not in ("listening", "thinking", "talking"):
-            return
-        x0, y0 = 48 * scale, 51 * scale
-        self.create_rectangle(
-            x0, y0, 64 * scale, 64 * scale,
-            fill=PANEL, outline="", tags="motion",
-        )
-        if self.emotion == "listening":
-            pattern = self.WAVE_FRAMES[self._frame % len(self.WAVE_FRAMES)]
-            bar_w, gap, mid, half = 1.7 * scale, 0.9 * scale, 58 * scale, 4 * scale
-            for index, height in enumerate(pattern):
-                x = (49.2 + index * 2.6) * scale
-                self.create_rectangle(
-                    x, mid - height * half, x + bar_w, mid + height * half,
-                    fill=WHITE, outline="", tags="motion",
-                )
-        elif self.emotion == "thinking":
-            active = self._frame % 3
-            for index in range(3):
-                x = (51.0 + index * 4.0) * scale
-                radius = (0.85 if index == active else 0.55) * scale
-                color = WHITE if index == active else MUTED
-                self.create_oval(
-                    x - radius, 58 * scale - radius,
-                    x + radius, 58 * scale + radius,
-                    fill=color, outline="", tags="motion",
-                )
-        else:
-            radius = (1.6 + (self._frame % 3) * 0.35) * scale
-            self.create_oval(
-                56 * scale - radius, 58 * scale - radius,
-                56 * scale + radius, 58 * scale + radius,
-                fill=WHITE, outline="", tags="motion",
-            )
 
 
 # ----------------------------------------------------------------------------
@@ -1229,7 +1347,7 @@ class VoiceAssistantApp:
         if mode == AVATAR_MODE_IMAGE:
             candidate = AvatarView(parent, size=64)
         else:
-            candidate = AnimatedReferenceAvatar(parent, size=64)
+            candidate = AnimatedReferenceAvatar(parent, size=72)
         if candidate.ok:
             return candidate
         candidate.destroy()
