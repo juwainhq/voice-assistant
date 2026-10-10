@@ -34,9 +34,12 @@ memories and Allowed Apps stay in sync everywhere.
 ### The voice pipeline (both apps)
 
 1. **Wake word** — a lightweight listener watches for the assistant's name
-   ("Nova", "Hey Nova", "Nova, I have a question"). On the desktop it runs on its
-   **own independent mic stream** (`sd.InputStream`), so it never blocks the main
-   microphone; on the phone the browser's speech recognition does the same job.
+   ("Nova", "Hey Nova", "Nova, I have a question"). On the desktop there is only
+   ever **one open mic stream** (`sd.InputStream`): a background thread keeps it
+   running and routes its audio into a rolling 3-second **wake buffer** (idle)
+   or a **question queue** (while recording) — a single `_wake_mode` event
+   switches between the two, so Windows audio drivers never see two streams.
+   On the phone the browser's speech recognition does the same job.
 2. **Activation** — a confirmation beep plays and the app switches to
    `Listening...` (the mic button listens for your question).
 3. **Understanding** — your speech is transcribed (Google speech recognition on
@@ -163,6 +166,12 @@ typing always works.
 ## Updates (key points)
 
 > Every change to this project is recorded here as key points, newest first.
+
+**2026-10-10 — Wake word rework (single shared mic stream)**
+- Rewrote the desktop wake system around **one shared `sd.InputStream`** that runs in a background thread for the whole session — Windows drivers often reject two streams at once, so only one is ever open.
+- The stream feeds two queues: a rolling **3-second wake buffer** and a **question queue**; one `threading.Event` (`_wake_mode`) switches between them.
+- Idle: the wake buffer is transcribed every 2 seconds and checked for the assistant's name. Mic button or wake hit: the same stream feeds the question queue for the full question (0.8 s silence cutoff).
+- The stream self-heals: if it ever stops, it is automatically reopened. Removed the old second-stream wake path (`_wake_listen_once`) and the stream-opening `record_question()`.
 
 **2026-10-10 — Mobile release**
 - Added `mobile_server.py` + `web/` — a phone-first installable PWA (manifest + service worker).
