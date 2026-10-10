@@ -2,8 +2,8 @@
 
 A voice assistant you can talk to on your **desktop** and on your **phone**. The desktop
 can use Google Gemini (`gemini-3.5-flash-lite`) or a local Ollama model; the mobile
-companion uses Gemini. Say "Hey Nova" and ask anything — Nova can chat, search the web,
-remember things about you, and open your apps.
+companion uses Gemini. Say "Hey Nova" and ask anything — Nova can chat and remember
+things about you; the desktop app can search and browse the web, show web images, and open apps.
 
 ---
 
@@ -27,8 +27,8 @@ memories and Allowed Apps stay in sync everywhere.
                     │  1. memory commands    │
                     │  2. local commands     │
                     │  3. open [app]         │
-                    │  4. "search for ..."   │
-                    │  5. Gemini / Ollama  │
+                    │  4. desktop web/image  │
+                    │  5. Gemini / Ollama    │
                     └────────────────────────┘
 ```
 
@@ -52,7 +52,8 @@ memories and Allowed Apps stay in sync everywhere.
      "help", "repeat that", "goodbye" — answered instantly, no internet needed.
    - **"open [app]"** — launches the program on the PC if it's on the
      Allowed Apps list (anything else answers *"That app isn't on my allowed list."*).
-   - **"search for …"** — DuckDuckGo results are fetched and given to the selected AI as context.
+   - **Desktop: "search for …" / "browse for …"** — DuckDuckGo results are fetched for the selected AI, with a clickable link to open the browser results.
+   - **Desktop: "show me pictures of …"** — Wikimedia Commons thumbnails are shown inline with clickable source pages; "browse to https://…" opens a web page in your browser.
    - **Anything else** — sent to the selected AI. Desktop supports Gemini or Local AI
      (Ollama); mobile uses Gemini. Things remembered about you are added to the prompt.
 4. **Reply** — the answer appears in the chat and is **spoken out loud**
@@ -70,6 +71,8 @@ memories and Allowed Apps stay in sync everywhere.
   (AI provider, Gemini API key or Ollama model, name, voice speed, Allowed Apps).
 - Mic button turns **red (#FF4444)** while Nova speaks — tap it to stop mid-sentence.
 - Typing dots while the selected AI thinks, `[Copy]` links on every message, Clear chat.
+- Web browsing: search/browse requests include a clickable browser link; explicit web addresses open in the default browser.
+- Ask **"show me pictures of …"** to display Wikimedia Commons thumbnails in chat with source links.
 - Closing the window **minimizes to the system tray** — click the icon to reopen.
 - Voice speed: slow / normal / fast (gTTS slow mode, or faster playback).
 
@@ -185,6 +188,10 @@ typing always works.
 ## Updates (key points)
 
 > Every change to this project is recorded here as key points, newest first.
+
+**2026-10-10 — Desktop web browsing and image search**
+- `search for …` and `browse for …` still provide DuckDuckGo context and now add a clickable link to open full browser results; `browse to https://…` opens an explicit page.
+- `show me pictures of …` searches Wikimedia Commons, displays up to four inline thumbnails with source-page links, and offers a DuckDuckGo image-results link as a fallback.
 
 **2026-10-10 — Browser preview synced with avatar selector**
 - `preview/index.html` now uses the same drawn, mouthless animated portrait and includes the three persisted Settings modes; its choice is saved locally in the browser.

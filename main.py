@@ -18,10 +18,13 @@ output uses gTTS with a pyttsx3 offline fallback when the network is unavailable
 Speech is played
 through sounddevice (so speed control and Stop work) with playsound as a
 fallback. Saying "search for ..." triggers a DuckDuckGo web search; saying
-"open [app]" launches an app from the Allowed Apps list.
+"show me pictures of ..." displays Commons thumbnails; "browse to [URL]" opens
+it in the default browser; and "open [app]" launches an Allowed Apps program.
 """
 
 import collections
+from concurrent.futures import ThreadPoolExecutor
+import io
 import json
 import math
 import os
@@ -32,6 +35,8 @@ import subprocess
 import tempfile
 import threading
 import time
+import webbrowser
+from urllib.parse import quote_plus, urlsplit
 
 import numpy as np
 import requests
@@ -340,11 +345,57 @@ def play_tone(frequency: int = 880, duration: float = 0.12,
 
 
 def extract_search_query(text: str) -> str | None:
-    """Return the query when the message asks to "search for ..."."""
-    parts = re.split(r"\bsearch for\b", text, maxsplit=1, flags=re.IGNORECASE)
-    if len(parts) == 2 and parts[1].strip():
-        return parts[1].strip(" .:!?")
-    return None
+    """Return a web-search query from "search for" or "browse for" requests."""
+    match = re.search(
+        r"\b(?:search\s+for|search\s+the\s+web\s+for|"
+        r"browse(?:\s+the\s+web)?\s+for)\s+(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).strip(" .:!?") if match else None
+
+
+def extract_image_query(text: str) -> str | None:
+    """Return the subject of an explicit request to find pictures or photos."""
+    match = re.search(
+        r"\b(?:show|find|pull\s+up|bring\s+up|display|get|see|look\s+up|"
+        r"search|browse)\b.*?"
+        r"\b(?:pictures?|images?|photos?)(?:\s+(?:from|on)\s+(?:the\s+)?"
+        r"(?:web|internet|online))?\s+(?:of|for|about)\s+(.+)$",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    query = match.group(1).strip(" .:!?")
+    query = re.sub(
+        r"\s+(?:from|on)\s+(?:the\s+)?(?:web|internet|online)$",
+        "", query, flags=re.IGNORECASE,
+    ).strip()
+    return query or None
+
+
+def extract_browser_url(text: str) -> str | None:
+    """Find an explicit URL request to open in the user's default browser."""
+    match = re.search(
+        r"\b(?:browse\s+to|go\s+to|visit|open\s+(?:the\s+)?website)\s+"
+        r"(https?://[^\s<>\"']+|www\.[^\s<>\"']+|"
+        r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/[^\s<>\"']*)?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(r"\bopen\s+(https?://[^\s<>\"']+)", text,
+                          flags=re.IGNORECASE)
+    if not match:
+        return None
+    url = match.group(1).rstrip(".,;:!?)]}")
+    if url.startswith("www."):
+        url = "https://" + url
+    elif not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url
+    parsed = urlsplit(url)
+    return url if parsed.scheme in ("http", "https") and parsed.netloc else None
 
 
 def extract_open_app(text: str) -> str | None:
@@ -452,6 +503,77 @@ def duckduckgo_search(query: str, max_results: int = 5) -> str:
         if len(results) >= max_results:
             break
     return "\n".join(results) if results else "(no results found on DuckDuckGo)"
+
+
+def web_image_search(query: str, max_results: int = 4) -> list[dict[str, str | bytes]]:
+    """Fetch thumbnail bytes and source pages from Wikimedia Commons."""
+    headers = {"User-Agent": "NovaVoiceAssistant/1.0 (desktop image search)"}
+    params = {
+        "action": "query",
+        "format": "json",
+        "formatversion": 2,
+        "generator": "search",
+        "gsrsearch": query,
+        "gsrnamespace": 6,
+        "gsrlimit": max(1, min(max_results, 6)),
+        "prop": "imageinfo",
+        "iiprop": "url",
+        "iiurlwidth": 480,
+    }
+    try:
+        response = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params=params,
+            headers=headers,
+            timeout=12,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except (requests.RequestException, ValueError) as error:
+        raise RuntimeError(f"Wikimedia image search failed: {error}") from error
+
+    pages = data.get("query", {}).get("pages", [])
+    candidates = []
+    for page in pages:
+        info_list = page.get("imageinfo") or []
+        if not info_list:
+            continue
+        info = info_list[0]
+        thumbnail = info.get("thumburl") or info.get("url")
+        source = info.get("descriptionurl")
+        title = str(page.get("title", "Web image"))
+        if not source and title:
+            source = ("https://commons.wikimedia.org/wiki/"
+                      + quote_plus(title.replace(" ", "_")))
+        if (thumbnail and thumbnail.startswith("https://")
+                and source and source.startswith("https://")):
+            candidates.append({"title": title.removeprefix("File:"),
+                               "thumbnail": thumbnail, "source": source})
+        if len(candidates) >= max_results:
+            break
+
+    def download(candidate: dict[str, str]) -> dict[str, str | bytes] | None:
+        try:
+            image_response = requests.get(
+                candidate["thumbnail"], headers=headers, timeout=8)
+            image_response.raise_for_status()
+            if not image_response.headers.get("content-type", "").lower().startswith("image/"):
+                return None
+            payload = image_response.content
+            if not payload or len(payload) > 4_000_000:
+                return None
+            if Image is not None:
+                with Image.open(io.BytesIO(payload)) as image:
+                    image.verify()
+            return {"title": candidate["title"],
+                    "source": candidate["source"], "data": payload}
+        except (requests.RequestException, OSError, ValueError):
+            return None
+
+    if not candidates:
+        return []
+    with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
+        return [image for image in pool.map(download, candidates) if image]
 
 
 def save_config(api_key: str, assistant_name: str,
@@ -1216,6 +1338,8 @@ class VoiceAssistantApp:
         self._pending_quit = False
         self._msg_counter = 0
         self._copy_texts: dict[str, str] = {}
+        self._web_link_counter = 0
+        self._web_image_photos: list = []
         self._typing_active = False
         self._typing_start = "1.0"
         self._typing_ticks = 0
@@ -1763,6 +1887,85 @@ class VoiceAssistantApp:
 
         self.root.after(0, insert)
 
+    def _append_browser_link(self, label: str, url: str) -> None:
+        """Append a clickable link that opens a web page in the default browser."""
+        def insert() -> None:
+            self._web_link_counter += 1
+            tag = f"web_link_{self._web_link_counter}"
+            self.chat_view.configure(state=tk.NORMAL)
+            self.chat_view.insert(tk.END, f"{label}\n\n", tag)
+            self.chat_view.tag_configure(
+                tag, foreground=WHITE, font=("Segoe UI", 8, "underline"))
+            self.chat_view.tag_bind(
+                tag, "<Button-1>",
+                lambda _event, target=url: self._open_web_url(target),
+            )
+            self.chat_view.tag_bind(
+                tag, "<Enter>", lambda _event: self.chat_view.config(cursor="hand2"))
+            self.chat_view.tag_bind(
+                tag, "<Leave>", lambda _event: self.chat_view.config(cursor="arrow"))
+            self.chat_view.configure(state=tk.DISABLED)
+            self.chat_view.see(tk.END)
+
+        self.root.after(0, insert)
+
+    def _show_web_images(self, images: list[dict[str, str | bytes]]) -> None:
+        """Insert downloaded web thumbnails and clickable source captions."""
+        def insert() -> None:
+            self.chat_view.configure(state=tk.NORMAL)
+            self.chat_view.insert(
+                tk.END, "Pictures from Wikimedia Commons (click a title for the source):\n")
+            for item in images:
+                try:
+                    if Image is not None and ImageTk is not None:
+                        with Image.open(io.BytesIO(item["data"])) as source_image:
+                            thumbnail = source_image.convert("RGB")
+                        resampling = (Image.Resampling.LANCZOS
+                                      if hasattr(Image, "Resampling") else Image.LANCZOS)
+                        thumbnail.thumbnail((190, 140), resampling)
+                        photo = ImageTk.PhotoImage(thumbnail, master=self.root)
+                        self._web_image_photos.append(photo)
+                        self.chat_view.image_create(
+                            tk.END, image=photo, padx=4, pady=4)
+                        self.chat_view.insert(tk.END, "\n")
+                except Exception as error:  # noqa: BLE001 - keep source link usable
+                    print(f"[image preview] could not display thumbnail: {error}")
+                self._web_link_counter += 1
+                tag = f"web_image_source_{self._web_link_counter}"
+                title = str(item.get("title", "Web image"))
+                source_url = str(item.get("source", ""))
+                self.chat_view.insert(tk.END, f"{title} — Open source\n", tag)
+                self.chat_view.tag_configure(
+                    tag, foreground=WHITE, font=("Segoe UI", 8, "underline"))
+                self.chat_view.tag_bind(
+                    tag, "<Button-1>",
+                    lambda _event, target=source_url: self._open_web_url(target),
+                )
+                self.chat_view.tag_bind(
+                    tag, "<Enter>", lambda _event: self.chat_view.config(cursor="hand2"))
+                self.chat_view.tag_bind(
+                    tag, "<Leave>", lambda _event: self.chat_view.config(cursor="arrow"))
+            self.chat_view.insert(tk.END, "\n")
+            self.chat_view.configure(state=tk.DISABLED)
+            self.chat_view.see(tk.END)
+
+        self.root.after(0, insert)
+
+    def _open_web_url(self, url: str) -> bool:
+        """Open an HTTP(S) page in the user's normal web browser."""
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            self._set_status("I can only open HTTP or HTTPS web pages.")
+            return False
+        try:
+            opened = webbrowser.open(url, new=2)
+            if not opened:
+                self._set_status("No web browser could open that link.")
+            return bool(opened)
+        except Exception as error:  # noqa: BLE001 - browser integration is optional
+            self._set_status(f"Could not open the web page: {error}")
+            return False
+
     def _copy_message(self, tag: str) -> None:
         text = self._copy_texts.get(tag, "")
         if not text:
@@ -1862,6 +2065,7 @@ class VoiceAssistantApp:
         self.chat_view.delete("1.0", tk.END)
         self.chat_view.configure(state=tk.DISABLED)
         self._copy_texts.clear()
+        self._web_image_photos.clear()
         self._typing_start = "1.0"
         self.chat = None
         self._ollama_history.clear()
@@ -2319,8 +2523,9 @@ class VoiceAssistantApp:
             return f"Today is {time.strftime('%A, %B %d, %Y')}."
         if q in ("help", "what can you do", "your features", "features"):
             return (
-                "You can ask me anything, say 'search for' to look something up, "
-                "'open' plus an app name to launch a program, 'what time is it', "
+                "You can ask me anything, say 'search for' or 'browse for' to look it up, "
+                "'show me pictures of' a subject to see web images, or 'browse to' a web address. "
+                "You can also say 'open' plus an allowed app name, ask the time, "
                 "'clear chat', 'repeat that', or 'stop' to silence me. "
                 "Tell me 'my name is' or 'remember that' and I'll keep it in "
                 "memory — ask 'what do you remember' to hear it back. "
@@ -2351,6 +2556,49 @@ class VoiceAssistantApp:
             self._set_busy(False)
             return
 
+        browser_url = extract_browser_url(question)
+        if browser_url is not None:
+            opened = self._open_web_url(browser_url)
+            answer = (f"Opening {browser_url} in your browser."
+                      if opened else f"I couldn't open {browser_url} in a browser.")
+            self._append_message("assistant", answer)
+            self._speak(answer)
+            self._busy_event.clear()
+            self._set_busy(False)
+            return
+
+        image_query = extract_image_query(question)
+        if image_query is not None:
+            self._show_typing()
+            self._set_status("Thinking...")
+            try:
+                images = web_image_search(image_query)
+                search_error = ""
+            except Exception as error:  # noqa: BLE001 - browsing is optional
+                images = []
+                search_error = " ".join(str(error).split())
+            self._hide_typing()
+            if images:
+                answer = f"Here are a few pictures of {image_query} from the web."
+                self._append_message("assistant", answer)
+                self._show_web_images(images)
+            elif search_error:
+                answer = f"I couldn't fetch pictures right now: {search_error}"
+                self._append_message("assistant", answer)
+            else:
+                answer = f"I couldn't find pictures of {image_query} right now."
+                self._append_message("assistant", answer)
+            image_url = (
+                "https://duckduckgo.com/?q=" + quote_plus(image_query)
+                + "&iax=images&ia=images"
+            )
+            self._append_browser_link("Open more image results in your browser", image_url)
+            self._last_answer = answer
+            self._speak(answer)
+            self._busy_event.clear()
+            self._set_busy(False)
+            return
+
         # "open [app name]" -> launch from the Allowed Apps list.
         app_name = extract_open_app(question)
         if app_name is not None:
@@ -2365,7 +2613,7 @@ class VoiceAssistantApp:
         prompt = question
         query = extract_search_query(question)
         if query:
-            self._set_status("Searching...")
+            self._set_status("Thinking...")
             results = duckduckgo_search(query)
             prompt = (
                 f"The user asked me to search the web for: {query}\n"
@@ -2428,6 +2676,11 @@ class VoiceAssistantApp:
         self._hide_typing()
         self._last_answer = answer
         self._append_message("assistant", answer)
+        if query:
+            self._append_browser_link(
+                "Open these web results in your browser",
+                "https://duckduckgo.com/?q=" + quote_plus(query),
+            )
         self._speak(answer)
         self._busy_event.clear()
         self._set_busy(False)
