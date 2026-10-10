@@ -169,6 +169,11 @@ typing always works.
 
 > Every change to this project is recorded here as key points, newest first.
 
+**2026-10-10 — Static image avatar with emotion overlays**
+- The header avatar is now a **static `avatar.png`** (loaded from the app folder via `PhotoImage`/PIL `ImageTk`) shown at 64×64 — swap in your own image any time.
+- Animated emoji-style overlay at the avatar's bottom-right: hidden when idle, an animated **sound wave** when listening, animated **"..." dots** when thinking, and pulsing **mouth-open dots** when speaking.
+- The animated drawn face (BubblyFace) is kept in `main.py` — set `USE_IMAGE_AVATAR = False` to change back; if `avatar.png` is missing the app falls back to it automatically.
+
 **2026-10-10 — UI polish (desktop)**
 - Animated face in the header slimmed down (72 → 48) to give the chat more room.
 - User messages now sit in a **#141414 bubble** with 6px padding (visually distinct from assistant replies).

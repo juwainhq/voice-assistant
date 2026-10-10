@@ -53,9 +53,15 @@ except ImportError:  # pragma: no cover - optional dependency
     pyttsx3 = None
 
 try:
+    from PIL import Image, ImageDraw, ImageTk
+except ImportError:  # pragma: no cover - optional dependency
+    Image = None
+    ImageDraw = None
+    ImageTk = None
+
+try:
     import pystray
-    from PIL import Image, ImageDraw
-    TRAY_AVAILABLE = True
+    TRAY_AVAILABLE = Image is not None
 except ImportError:  # pragma: no cover - optional dependency
     TRAY_AVAILABLE = False
 
@@ -72,6 +78,10 @@ NO_APP_REPLY = "That app isn't on my allowed list."
 SPEEDS = {0: "slow", 1: "normal", 2: "fast"}
 FAST_RATE = 1.35  # playback rate for the "fast" voice speed
 STOP_RED = "#FF4444"  # mic button background while speaking (click to stop)
+
+# Avatar: set USE_IMAGE_AVATAR = False to bring back the drawn BubblyFace.
+USE_IMAGE_AVATAR = True
+AVATAR_FILE = "avatar.png"  # static avatar image, same folder as main.py
 
 # Wake-word listener (shares the single mic stream with question recording)
 WAKE_CHECK_SECONDS = 2.0  # how often the rolling wake buffer is transcribed
@@ -708,6 +718,115 @@ class BubblyFace(tk.Canvas):
             self.itemconfig(eye, width=w)
 
 
+def _load_avatar_photo(size: int):
+    """Load avatar.png from the app folder, scaled to size x size.
+
+    Uses PIL's ImageTk when available (exact scaling for any source size),
+    falling back to plain tk.PhotoImage with integer subsample/zoom.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        AVATAR_FILE)
+    if not os.path.isfile(path):
+        return None
+    try:
+        if Image is not None and ImageTk is not None:
+            img = Image.open(path).convert("RGBA").resize(
+                (size, size), Image.LANCZOS)
+            return ImageTk.PhotoImage(img)
+    except Exception:  # noqa: BLE001 - fall back to plain PhotoImage
+        pass
+    try:
+        photo = tk.PhotoImage(file=path)
+        w = photo.width()
+        if w >= size:
+            photo = photo.subsample(max(1, int(round(w / size))))
+        else:
+            photo = photo.zoom(max(1, int(round(size / w))))
+        return photo
+    except Exception:  # noqa: BLE001 - no usable image
+        return None
+
+
+class AvatarView(tk.Frame):
+    """Static avatar image with animated emotion overlays.
+
+    The image (avatar.png) sits in the header at 64x64. A small overlay in
+    its bottom-right corner shows the state: hidden when idle, an animated
+    sound wave when listening, animated "..." dots when thinking, and
+    animated mouth-open dots when speaking. The old drawn face is kept in
+    BubblyFace below - set USE_IMAGE_AVATAR = False to switch back to it.
+    """
+
+    FRAME_MS = 120  # overlay animation tick
+    WAVE_FRAMES = (  # bar-height patterns for the listening sound wave
+        (0.35, 0.85, 0.50, 1.00, 0.45),
+        (0.85, 0.45, 1.00, 0.40, 0.80),
+        (0.50, 1.00, 0.40, 0.85, 0.60),
+        (1.00, 0.55, 0.85, 0.55, 0.95),
+    )
+
+    def __init__(self, parent, size: int = 64, **kwargs) -> None:
+        super().__init__(parent, width=size, height=size, bg=BG, **kwargs)
+        self.size = size
+        self.emotion = "idle"
+        self.ok = False
+        self._frame = 0
+
+        self._photo = _load_avatar_photo(size)
+        if self._photo is None:
+            return  # no avatar image - the caller falls back to BubblyFace
+        self.ok = True
+        self.image_label = tk.Label(self, image=self._photo, bg=BG,
+                                    borderwidth=0, highlightthickness=0)
+        self.image_label.place(x=0, y=0, width=size, height=size)
+
+        # Overlay chip in the bottom-right corner of the avatar.
+        self.dots = tk.Label(self, text="", width=3, bg=PANEL, fg=WHITE,
+                             font=("Segoe UI", 8, "bold"),
+                             padx=2, pady=0, borderwidth=0)
+        self.wave = tk.Canvas(self, width=26, height=16, bg=PANEL,
+                              highlightthickness=0, borderwidth=0)
+        self.after(self.FRAME_MS, self._tick)
+
+    def set_emotion(self, emotion: str) -> None:
+        """Switch expression: idle, happy, listening, thinking, talking, sad."""
+        if emotion in ("idle", "happy", "listening",
+                       "thinking", "talking", "sad"):
+            self.emotion = emotion
+
+    def _show_overlay(self, widget) -> None:
+        for item in (self.dots, self.wave):
+            if item is widget:
+                item.place(relx=1.0, rely=1.0, anchor="se", x=-2, y=-2)
+            else:
+                item.place_forget()
+
+    def _tick(self) -> None:
+        emo = self.emotion
+        if emo == "listening":
+            self._show_overlay(self.wave)
+            pattern = self.WAVE_FRAMES[self._frame % len(self.WAVE_FRAMES)]
+            self._frame += 1
+            self.wave.delete("all")
+            x, bar_w, gap, mid, half = 2, 3, 2, 8, 6
+            for height in pattern:
+                self.wave.create_rectangle(
+                    x, mid - height * half, x + bar_w, mid + height * half,
+                    fill=WHITE, outline="")
+                x += bar_w + gap
+        elif emo == "thinking":
+            self._show_overlay(self.dots)
+            self._frame += 1
+            self.dots.config(text="." * (self._frame % 3 + 1))
+        elif emo == "talking":
+            self._show_overlay(self.dots)
+            self._frame += 1
+            self.dots.config(text=("○", "●")[self._frame % 2])
+        else:
+            self._show_overlay(None)
+        self.after(self.FRAME_MS, self._tick)
+
+
 # ----------------------------------------------------------------------------
 # The desktop app
 # ----------------------------------------------------------------------------
@@ -776,7 +895,15 @@ class VoiceAssistantApp:
         # Header: avatar + name on the left; status dot + gear on the right.
         header = tk.Frame(self.root, bg=BG)
         header.pack(fill=tk.X, padx=18, pady=(12, 8))
-        self.face = BubblyFace(header, size=48)
+        self.face = None
+        if USE_IMAGE_AVATAR:
+            candidate = AvatarView(header, size=64)
+            if candidate.ok:
+                self.face = candidate
+            else:
+                candidate.destroy()
+        if self.face is None:  # image missing or disabled -> drawn face
+            self.face = BubblyFace(header, size=48)
         self.face.pack(side=tk.LEFT, padx=(0, 12))
         title_box = tk.Frame(header, bg=BG)
         title_box.pack(side=tk.LEFT)
