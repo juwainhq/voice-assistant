@@ -1,11 +1,11 @@
 {
-  "name": "Nova Voice Assistant",
-  "short_name": "Nova",
-  "description": "Your voice assistant, in your pocket.",
+  "name": "Nova Voice Chat",
+  "short_name": "Nova Chat",
+  "description": "Chat with Nova by typing or speaking.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#000000",
-  "theme_color": "#000000",
+  "background_color": "#050505",
+  "theme_color": "#050505",
   "icons": [
     {
       "src": "/icon.svg",

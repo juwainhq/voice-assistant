@@ -1,57 +1,32 @@
-"""Nova — a desktop voice assistant built with tkinter.
+"""Nova — a voice-first chat app for desktop.
 
-Layout:
-    - Full-width dark window (900x620): header bar, chat, input row.
-    - Header: avatar + assistant name on the left; a status dot and a gear
-      button (settings popup) on the right.
-    - Chat window with the conversation history and a [Copy] link per message.
-    - Input row: text entry with Mic + Send buttons on the right. While the
-      assistant speaks the Mic button turns red — click it to stop.
-    - Status line below the input: "Listening...", "Thinking...", "Speaking...".
-    - Typing indicator dots while the selected AI is thinking.
-    - Settings popup (gear button): Gemini API or Local AI (Ollama), assistant
-      name, voice speed, Allowed Apps.
-    - Closing the window minimizes to the system tray (pystray).
-
-The AI brain can be Gemini (gemini-3.5-flash-lite) or local Ollama. Voice
-output uses gTTS with a pyttsx3 offline fallback when the network is unavailable.
-Speech is played
-through sounddevice (so speed control and Stop work) with playsound as a
-fallback. Saying "search for ..." triggers a DuckDuckGo web search; saying
-"show me pictures of ..." displays Commons thumbnails; "browse to [URL]" opens
-it in the default browser; and "open [app]" launches an Allowed Apps program.
+The desktop chat follows the compact conversation/model-picker workflow of
+Coucou by Louis Raillé (MIT); it keeps Nova's own mouthless animated portrait,
+shared-microphone wake listener, and voice I/O. Chat providers are independent
+adapters in chat_providers.py, so adding another compatible backend is simple.
 """
 
 import collections
-from concurrent.futures import ThreadPoolExecutor
-import io
-import json
+import importlib
 import math
 import os
 import queue
 import random
 import re
-import subprocess
 import tempfile
 import threading
 import time
-import webbrowser
-from urllib.parse import quote_plus, urlsplit
 
 import numpy as np
-import requests
 import sounddevice as sd
 import speech_recognition as sr
 from gtts import gTTS
 from playsound import playsound
-from google import genai
-from google.genai import types
 import tkinter as tk
+from tkinter import ttk
 
-try:
-    import ollama
-except ImportError:  # pragma: no cover - Local AI is an optional mode
-    ollama = None
+import chat_providers
+import config
 
 try:
     import miniaudio  # mp3 -> PCM decoding (speed control + interruptible playback)
@@ -76,21 +51,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     TRAY_AVAILABLE = False
 
-import config
-
 # ----------------------------------------------------------------------------
 # Constants
 # ----------------------------------------------------------------------------
 
-GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_ASSISTANT_NAME = "Nova"
-DEFAULT_OLLAMA_MODEL = "phi3:mini"
-OLLAMA_HOST = "http://localhost:11434"
-AI_PROVIDER_GEMINI = "gemini"
-AI_PROVIDER_OLLAMA = "ollama"
-PLACEHOLDER_KEY = "YOUR_GEMINI_API_KEY_HERE"
-NO_APP_REPLY = "That app isn't on my allowed list."
-SPEEDS = {0: "slow", 1: "normal", 2: "fast"}
 FAST_RATE = 1.35  # playback rate for the "fast" voice speed
 STOP_RED = "#FF4444"  # mic button background while speaking (click to stop)
 
@@ -139,7 +104,7 @@ FONT_SECTION = ("Segoe UI", 12, "bold")
 
 
 # ----------------------------------------------------------------------------
-# Voice I/O, web search, commands, and config helpers
+# Voice I/O and config helpers
 # ----------------------------------------------------------------------------
 
 
@@ -344,80 +309,6 @@ def play_tone(frequency: int = 880, duration: float = 0.12,
         pass
 
 
-def extract_search_query(text: str) -> str | None:
-    """Return a web-search query from "search for" or "browse for" requests."""
-    match = re.search(
-        r"\b(?:search\s+for|search\s+the\s+web\s+for|"
-        r"browse(?:\s+the\s+web)?\s+for)\s+(.+)$",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return match.group(1).strip(" .:!?") if match else None
-
-
-def extract_image_query(text: str) -> str | None:
-    """Return the subject of an explicit request to find pictures or photos."""
-    match = re.search(
-        r"\b(?:show|find|pull\s+up|bring\s+up|display|get|see|look\s+up|"
-        r"search|browse)\b.*?"
-        r"\b(?:pictures?|images?|photos?)(?:\s+(?:from|on)\s+(?:the\s+)?"
-        r"(?:web|internet|online))?\s+(?:of|for|about)\s+(.+)$",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        return None
-    query = match.group(1).strip(" .:!?")
-    query = re.sub(
-        r"\s+(?:from|on)\s+(?:the\s+)?(?:web|internet|online)$",
-        "", query, flags=re.IGNORECASE,
-    ).strip()
-    return query or None
-
-
-def extract_browser_url(text: str) -> str | None:
-    """Find an explicit URL request to open in the user's default browser."""
-    match = re.search(
-        r"\b(?:browse\s+to|go\s+to|visit|open\s+(?:the\s+)?website)\s+"
-        r"(https?://[^\s<>\"']+|www\.[^\s<>\"']+|"
-        r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/[^\s<>\"']*)?)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if not match:
-        match = re.search(r"\bopen\s+(https?://[^\s<>\"']+)", text,
-                          flags=re.IGNORECASE)
-    if not match:
-        return None
-    url = match.group(1).rstrip(".,;:!?)]}")
-    if url.startswith("www."):
-        url = "https://" + url
-    elif not url.lower().startswith(("http://", "https://")):
-        url = "https://" + url
-    parsed = urlsplit(url)
-    return url if parsed.scheme in ("http", "https") and parsed.netloc else None
-
-
-def extract_open_app(text: str) -> str | None:
-    """Return the app name when the message asks to "open [app name]"."""
-    match = re.match(
-        r"^\s*(?:please\s+)?(?:can\s+you\s+)?open\s+(.+?)\s*$",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if match:
-        return match.group(1).strip(" .:!?")
-    return None
-
-
-# Utterances that are just "wake me up" chatter with no real question yet.
-WAKE_ONLY_TAILS = {
-    "", "i have a question", "i've got a question", "ive got a question",
-    "question", "yes", "yeah", "hello", "hi", "hey", "are you there",
-    "can you hear me", "wake up", "you there", "it's me", "its me",
-}
-
-
 def extract_wake_question(text: str, wake_name: str) -> str | None:
     """Detect the wake phrase and split off the question that follows.
 
@@ -440,277 +331,6 @@ def extract_wake_question(text: str, wake_name: str) -> str | None:
     return "" if tail.lower() in WAKE_ONLY_TAILS else tail
 
 
-def duckduckgo_search(query: str, max_results: int = 5) -> str:
-    """Search DuckDuckGo and return a plain-text summary of the results.
-
-    Uses the Instant Answer API first, then falls back to the HTML results
-    page when the API has nothing for this query.
-    """
-    headers = {"User-Agent": "Mozilla/5.0 (voice-assistant)"}
-    try:
-        response = requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
-            headers=headers,
-            timeout=10,
-        )
-        data = response.json()
-    except (requests.RequestException, ValueError) as error:
-        return f"(web search failed: {error})"
-
-    parts: list[str] = []
-    if data.get("Answer"):
-        parts.append(str(data["Answer"]))
-    if data.get("AbstractText"):
-        parts.append(data["AbstractText"])
-    if data.get("AbstractURL"):
-        parts.append(f"Source: {data['AbstractURL']}")
-    for topic in data.get("RelatedTopics", []):
-        if not isinstance(topic, dict):
-            continue
-        if topic.get("Text"):
-            parts.append(f"- {topic['Text']}")
-        for sub in topic.get("Topics", []):
-            if isinstance(sub, dict) and sub.get("Text"):
-                parts.append(f"- {sub['Text']}")
-        if len(parts) >= max_results + 2:
-            break
-    if parts:
-        return "\n".join(parts[: max_results + 2])
-
-    # Fallback: parse the HTML results page.
-    try:
-        response = requests.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers=headers,
-            timeout=10,
-        )
-        page = response.text
-    except requests.RequestException as error:
-        return f"(web search failed: {error})"
-
-    results: list[str] = []
-    pattern = (
-        r'class="result__a"[^>]*>(?P<title>.*?)</a>.*?'
-        r'class="result__snippet"[^>]*>(?P<snippet>.*?)</(?:a|div)>'
-    )
-    for match in re.finditer(pattern, page, flags=re.DOTALL | re.IGNORECASE):
-        title = re.sub(r"<[^>]+>", "", match.group("title")).strip()
-        snippet = re.sub(r"<[^>]+>", "", match.group("snippet")).strip()
-        if title:
-            results.append(f"- {title}: {snippet}")
-        if len(results) >= max_results:
-            break
-    return "\n".join(results) if results else "(no results found on DuckDuckGo)"
-
-
-def web_image_search(query: str, max_results: int = 4) -> list[dict[str, str | bytes]]:
-    """Fetch thumbnail bytes and source pages from Wikimedia Commons."""
-    headers = {"User-Agent": "NovaVoiceAssistant/1.0 (desktop image search)"}
-    params = {
-        "action": "query",
-        "format": "json",
-        "formatversion": 2,
-        "generator": "search",
-        "gsrsearch": query,
-        "gsrnamespace": 6,
-        "gsrlimit": max(1, min(max_results, 6)),
-        "prop": "imageinfo",
-        "iiprop": "url",
-        "iiurlwidth": 480,
-    }
-    try:
-        response = requests.get(
-            "https://commons.wikimedia.org/w/api.php",
-            params=params,
-            headers=headers,
-            timeout=12,
-        )
-        response.raise_for_status()
-        data = response.json()
-    except (requests.RequestException, ValueError) as error:
-        raise RuntimeError(f"Wikimedia image search failed: {error}") from error
-
-    pages = data.get("query", {}).get("pages", [])
-    candidates = []
-    for page in pages:
-        info_list = page.get("imageinfo") or []
-        if not info_list:
-            continue
-        info = info_list[0]
-        thumbnail = info.get("thumburl") or info.get("url")
-        source = info.get("descriptionurl")
-        title = str(page.get("title", "Web image"))
-        if not source and title:
-            source = ("https://commons.wikimedia.org/wiki/"
-                      + quote_plus(title.replace(" ", "_")))
-        if (thumbnail and thumbnail.startswith("https://")
-                and source and source.startswith("https://")):
-            candidates.append({"title": title.removeprefix("File:"),
-                               "thumbnail": thumbnail, "source": source})
-        if len(candidates) >= max_results:
-            break
-
-    def download(candidate: dict[str, str]) -> dict[str, str | bytes] | None:
-        try:
-            image_response = requests.get(
-                candidate["thumbnail"], headers=headers, timeout=8)
-            image_response.raise_for_status()
-            if not image_response.headers.get("content-type", "").lower().startswith("image/"):
-                return None
-            payload = image_response.content
-            if not payload or len(payload) > 4_000_000:
-                return None
-            if Image is not None:
-                with Image.open(io.BytesIO(payload)) as image:
-                    image.verify()
-            return {"title": candidate["title"],
-                    "source": candidate["source"], "data": payload}
-        except (requests.RequestException, OSError, ValueError):
-            return None
-
-    if not candidates:
-        return []
-    with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
-        return [image for image in pool.map(download, candidates) if image]
-
-
-def save_config(api_key: str, assistant_name: str,
-                allowed_apps: dict | None = None,
-                ai_provider: str | None = None,
-                ollama_model: str | None = None,
-                avatar_mode: str | None = None) -> None:
-    """Persist the settings back to config.py."""
-    apps = allowed_apps if allowed_apps is not None else {}
-    provider = ai_provider or getattr(config, "AI_PROVIDER", AI_PROVIDER_GEMINI)
-    if provider not in (AI_PROVIDER_GEMINI, AI_PROVIDER_OLLAMA):
-        provider = AI_PROVIDER_GEMINI
-    model = (ollama_model or getattr(config, "OLLAMA_MODEL",
-                                     DEFAULT_OLLAMA_MODEL)).strip()
-    if not model:
-        model = DEFAULT_OLLAMA_MODEL
-    mode = avatar_mode or getattr(config, "AVATAR_MODE", DEFAULT_AVATAR_MODE)
-    if mode not in AVATAR_MODES:
-        mode = DEFAULT_AVATAR_MODE
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
-    content = (
-        '"""Configuration settings for the voice assistant."""\n\n'
-        "# Get your Gemini API key from Google AI Studio: "
-        "https://aistudio.google.com/apikey\n"
-        "# NOTE: Do not commit a real API key to a public repository.\n"
-        f"GEMINI_API_KEY = {api_key!r}\n\n"
-        "# AI provider used by the desktop app: 'gemini' or 'ollama'.\n"
-        f"AI_PROVIDER = {provider!r}\n\n"
-        "# Ollama model name (download with: ollama pull <model>).\n"
-        f"OLLAMA_MODEL = {model!r}\n\n"
-        "# Desktop avatar: 'portrait', 'grokbot', or 'image'.\n"
-        f"AVATAR_MODE = {mode!r}\n\n"
-        "# Name the assistant introduces itself with (editable in the app's Settings).\n"
-        f"ASSISTANT_NAME = {assistant_name!r}\n\n"
-        "# Apps the assistant may open with 'open [app name]'.\n"
-        f"ALLOWED_APPS = {apps!r}\n"
-    )
-    with open(path, "w", encoding="utf-8") as file:
-        file.write(content)
-
-
-# ----------------------------------------------------------------------------
-# Long-term memory (user name + facts the user asked to remember)
-# ----------------------------------------------------------------------------
-
-MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "memory.json")
-
-
-def load_memory() -> dict:
-    """Load the user's memory (name + remembered facts) from memory.json."""
-    try:
-        with open(MEMORY_FILE, encoding="utf-8") as file:
-            data = json.load(file)
-        return {
-            "user_name": str(data.get("user_name", "")),
-            "facts": [str(f) for f in data.get("facts", [])],
-        }
-    except (OSError, ValueError):
-        return {"user_name": "", "facts": []}
-
-
-def save_memory(memory: dict) -> None:
-    """Persist the user's memory to memory.json."""
-    try:
-        with open(MEMORY_FILE, "w", encoding="utf-8") as file:
-            json.dump({"user_name": memory.get("user_name", ""),
-                       "facts": list(memory.get("facts", []))},
-                      file, indent=2)
-    except OSError:
-        pass
-
-
-def parse_memory_command(text: str) -> tuple[str, str] | None:
-    """Parse memory commands exactly as spoken.
-
-    Returns (action, payload) with action one of:
-    set_name, remember, forget, forget_name, forget_all, recall_name, recall_all.
-    Returns None when the utterance is not a memory command.
-    """
-    s = text.strip()
-
-    # "my name is Ali" / "remember my name is Ali" / "call me Ali"
-    m = re.match(
-        r"^(?:please\s+)?(?:remember\s+(?:that\s+)?)?my name is (?P<name>.+)$",
-        s, flags=re.IGNORECASE)
-    if m:
-        return "set_name", m.group("name").strip(" .!?\"'")
-    m = re.match(
-        r"^(?:please\s+)?(?:(?:you\s+)?can\s+)?call me (?P<name>.+)$",
-        s, flags=re.IGNORECASE)
-    if m:
-        return "set_name", m.group("name").strip(" .!?\"'")
-
-    # "forget my name" / "forget that my name is ..."
-    if re.match(r"^forget\s+(?:that\s+)?my name\b.*$", s, flags=re.IGNORECASE):
-        return "forget_name", ""
-
-    # "forget everything" is handled by the generic forget below.
-    # "forget i like pizza" / "forget that i like pizza"
-    m = re.match(r"^forget\s+(?:that\s+)?(?P<fact>.+)$", s, flags=re.IGNORECASE)
-    if m:
-        fact = m.group("fact").strip(" .!?\"'")
-        if fact.lower() in ("everything", "all", "all my memories",
-                            "what you know", "what you know about me",
-                            "your memories", "memories"):
-            return "forget_all", ""
-        return "forget", fact
-
-    # "don't remember i like pizza" is a forget too
-    m = re.match(
-        r"^(?:do not|don't)\s+remember\s+(?:that\s+)?(?P<fact>.+)$",
-        s, flags=re.IGNORECASE)
-    if m:
-        return "forget", m.group("fact").strip(" .!?\"'")
-
-    # "what's my name" / "who am i"
-    if re.match(r"^(?:what(?:'s|s| is) my name|who am i|do you know my name)\??$",
-                s, flags=re.IGNORECASE):
-        return "recall_name", ""
-
-    # "what do you remember" / "what do you know about me" / "what are my memories"
-    if re.match(r"^(?:what do you (?:remember|know about me)"
-                r"|what are (?:my )?(?:your )?memories|what do you know)\??$",
-                s, flags=re.IGNORECASE):
-        return "recall_all", ""
-
-    # "remember (that) i like pizza" — keep the fact verbatim as spoken
-    m = re.match(
-        r"^(?:please\s+)?remember\s+(?:that\s+)?(?P<fact>.+)$",
-        s, flags=re.IGNORECASE)
-    if m:
-        return "remember", m.group("fact").strip(" .!?\"'")
-
-    return None
-
-
 def infer_emotion(status: str) -> str:
     """Map a status line to the face emotion."""
     s = status.lower()
@@ -720,13 +340,9 @@ def infer_emotion(status: str) -> str:
         return "thinking"
     if "speaking" in s:
         return "talking"
-    if any(bad in s for bad in ("mic failed", "can't understand", "can't open",
-                               "can't speak", "sorry", "failed", "enter both",
-                               "select an app", "don't have a memory")):
+    if any(bad in s for bad in ("mic failed", "can't understand", "sorry", "failed")):
         return "sad"
-    if any(good in s for good in ("copied", "saved", "cleared", "added",
-                                  "removed", "forgot", "got it",
-                                  "i'll remember", "opening")):
+    if any(good in s for good in ("copied", "saved", "cleared", "connected")):
         return "happy"
     return "idle"
 
@@ -1287,31 +903,21 @@ class VoiceAssistantApp:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.api_key = getattr(config, "GEMINI_API_KEY", "")
-        self.ai_provider = str(getattr(config, "AI_PROVIDER", AI_PROVIDER_GEMINI)).lower()
-        if self.ai_provider not in (AI_PROVIDER_GEMINI, AI_PROVIDER_OLLAMA):
-            self.ai_provider = AI_PROVIDER_GEMINI
-        self.ollama_model = str(
-            getattr(config, "OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
-            or DEFAULT_OLLAMA_MODEL
-        ).strip()
-        if not self.ollama_model:
-            self.ollama_model = DEFAULT_OLLAMA_MODEL
-        self.avatar_mode = str(
+        self.ai_provider = chat_providers.normalize_provider(
+            getattr(config, "AI_PROVIDER", "google"))
+        self.model = chat_providers.model_for(config, self.ai_provider)
+        self.chat_history: list[dict[str, str]] = []
+        self.avatar_mode = (AVATAR_MODE_IMAGE if USE_IMAGE_AVATAR else str(
             getattr(config, "AVATAR_MODE", DEFAULT_AVATAR_MODE)
-        ).lower()
+        ).lower())
         if self.avatar_mode not in AVATAR_MODES:
             self.avatar_mode = DEFAULT_AVATAR_MODE
-        self.assistant_name = getattr(config, "ASSISTANT_NAME", DEFAULT_ASSISTANT_NAME)
-        self.allowed_apps: dict[str, str] = dict(
-            getattr(config, "ALLOWED_APPS", {}) or {}
+        self.assistant_name = str(
+            getattr(config, "ASSISTANT_NAME", DEFAULT_ASSISTANT_NAME)
+            or DEFAULT_ASSISTANT_NAME
         )
-        self.memory = load_memory()  # user name + remembered facts
-        self.client = None
-        self.chat = None
-        self._gemini_error = ""
-        self._ollama_client = None
-        self._ollama_history: list[dict[str, str]] = []
+        saved_speed = str(getattr(config, "VOICE_SPEED", "normal")).lower()
+        self._speed = saved_speed if saved_speed in ("slow", "normal", "fast") else "normal"
         self.tray_icon = None
 
         self.speech_lock = threading.Lock()
@@ -1333,23 +939,20 @@ class VoiceAssistantApp:
         self._wake_last_check = 0.0
         self._wake_unclear = 0
         self._running = True
-        self._speed = "normal"
-        self._last_answer = ""
-        self._pending_quit = False
         self._msg_counter = 0
         self._copy_texts: dict[str, str] = {}
-        self._web_link_counter = 0
-        self._web_image_photos: list = []
         self._typing_active = False
         self._typing_start = "1.0"
         self._typing_ticks = 0
         self._typing_job = None
         self._settings_win = None
+        self._model_picker_win = None
         self._dot_blink_job = None
         self._dot_color = MUTED
 
-        root.title(f"{self.assistant_name} — Voice Assistant")
-        root.geometry("900x620")
+        root.title(f"{self.assistant_name} — Chat")
+        root.geometry("940x700")
+        root.minsize(640, 500)
         root.configure(bg=BG)
         root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
 
@@ -1366,106 +969,173 @@ class VoiceAssistantApp:
     # ----- UI construction ---------------------------------------------------
 
     def _build_ui(self) -> None:
-        # Header: avatar + name on the left; status dot + gear on the right.
-        header = tk.Frame(self.root, bg=BG)
-        header.pack(fill=tk.X, padx=18, pady=(12, 8))
-        self._avatar_header = header
-        self.face = self._make_avatar_widget(header, self.avatar_mode)
-        self.face.pack(side=tk.LEFT, padx=(0, 12))
-        title_box = tk.Frame(header, bg=BG)
-        title_box.pack(side=tk.LEFT)
-        self.title_label = tk.Label(
-            title_box, text=self.assistant_name,
-            font=FONT_TITLE, bg=BG, fg=TEXT,
+        """Build the compact, provider-first voice chat screen."""
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "TCombobox", fieldbackground=ENTRY_BG, background=GRAY,
+            foreground=TEXT, arrowcolor=TEXT, bordercolor=ENTRY_BORDER,
+            lightcolor=ENTRY_BORDER, darkcolor=ENTRY_BORDER,
         )
-        self.title_label.pack(anchor="w")
-        tk.Label(
-            title_box, text="voice assistant", font=FONT, bg=BG, fg=MUTED,
-        ).pack(anchor="w")
+        style.map(
+            "TCombobox", fieldbackground=[("readonly", ENTRY_BG)],
+            foreground=[("readonly", TEXT)],
+            selectbackground=[("readonly", GRAY)],
+            selectforeground=[("readonly", TEXT)],
+        )
+        header = tk.Frame(self.root, bg=BG)
+        header.pack(fill=tk.X, padx=18, pady=(10, 8))
+        header.grid_columnconfigure(0, weight=1)
+        header.grid_columnconfigure(1, weight=2)
+        header.grid_columnconfigure(2, weight=1)
 
         self.gear_button = tk.Button(
-            header, text="\u2699 Settings", font=FONT_BOLD,
-            command=self._open_settings,
-            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
-            relief=tk.FLAT, padx=14, pady=8, cursor="hand2", borderwidth=0,
+            header, text="Settings", font=FONT_BOLD, command=self._open_settings,
+            bg=BG, fg=MUTED, activebackground=GRAY, activeforeground=TEXT,
+            relief=tk.FLAT, padx=10, pady=6, cursor="hand2", borderwidth=0,
         )
-        self.gear_button.pack(side=tk.RIGHT)
-        self.status_dot = tk.Canvas(header, width=12, height=12, bg=BG,
+        self.gear_button.grid(row=0, column=0, sticky="w")
+
+        self._avatar_header = tk.Frame(header, bg=BG)
+        self._avatar_header.grid(row=0, column=1, sticky="n")
+        self.face = self._make_avatar_widget(self._avatar_header, self.avatar_mode)
+        self.face.pack(anchor="center")
+        self.title_label = tk.Label(
+            self._avatar_header, text=self.assistant_name,
+            font=FONT_TITLE, bg=BG, fg=TEXT,
+        )
+        self.title_label.pack(anchor="center", pady=(2, 0))
+        tk.Label(
+            self._avatar_header, text="voice chat", font=("Segoe UI", 8),
+            bg=BG, fg=MUTED,
+        ).pack(anchor="center")
+
+        status_box = tk.Frame(header, bg=BG)
+        status_box.grid(row=0, column=2, sticky="e")
+        self.status_dot = tk.Canvas(status_box, width=12, height=12, bg=BG,
                                     highlightthickness=0, borderwidth=0)
-        self.status_dot.pack(side=tk.RIGHT, padx=(0, 10))
+        self.status_dot.pack(side=tk.RIGHT, padx=(8, 0))
         self._dot = self.status_dot.create_oval(1, 1, 11, 11,
                                                 fill=MUTED, outline="")
 
-        # Thin #242424 separator line between the header and the chat window.
         tk.Frame(self.root, bg=ENTRY_BORDER, height=1).pack(fill=tk.X)
 
-        # Chat window (conversation history) - full width, no border.
         chat_frame = tk.Frame(self.root, bg=CARD)
-        chat_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(4, 6))
+        chat_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(8, 4))
         self.chat_view = tk.Text(
             chat_frame, bg=CARD, fg=TEXT, font=FONT, relief=tk.FLAT,
-            wrap=tk.WORD, state=tk.DISABLED, padx=18, pady=14, spacing3=6,
+            wrap=tk.WORD, state=tk.DISABLED, padx=22, pady=18, spacing3=8,
             cursor="arrow", borderwidth=0, highlightthickness=0,
         )
-        scrollbar = tk.Scrollbar(chat_frame, command=self.chat_view.yview,
-                                 width=10, relief=tk.FLAT, bg=ENTRY_BORDER,
-                                 activebackground=MUTED, troughcolor=CARD)
+        scrollbar = tk.Scrollbar(
+            chat_frame, command=self.chat_view.yview, width=8, relief=tk.FLAT,
+            bg=ENTRY_BORDER, activebackground=MUTED, troughcolor=CARD,
+        )
         self.chat_view.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.chat_view.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.chat_view.tag_configure("user_name", foreground=TEXT,
-                                     font=FONT_BOLD, justify=tk.RIGHT)
-        self.chat_view.tag_configure("assistant_name", foreground=MUTED,
-                                     font=FONT_BOLD, justify=tk.LEFT)
-        self.chat_view.tag_configure("system_name", foreground=MUTED,
-                                     font=FONT_BOLD)
-        self.chat_view.tag_configure("user_text", foreground=TEXT,
-                                     justify=tk.RIGHT,
-                                     background=GRAY, spacing1=6, spacing3=6,
-                                     lmargin1=60, lmargin2=60)
-        self.chat_view.tag_configure("assistant_text", foreground=MUTED,
-                                     justify=tk.LEFT)
-        self.chat_view.tag_configure("system_text", foreground=MUTED,
-                                     lmargin1=60, lmargin2=60)
-        self.chat_view.tag_configure("typing_line", foreground=MUTED,
+        self.chat_view.tag_configure(
+            "user_bubble", foreground=TEXT, background=GRAY, justify=tk.RIGHT,
+            lmargin1=100, lmargin2=100, rmargin=4, spacing1=8, spacing3=10,
+        )
+        self.chat_view.tag_configure(
+            "assistant_name", foreground=TEXT, font=FONT_BOLD,
+            spacing1=8, spacing3=2,
+        )
+        self.chat_view.tag_configure(
+            "assistant_text", foreground="#C8C8C8", justify=tk.LEFT,
+            lmargin1=3, lmargin2=3, spacing3=2,
+        )
+        self.chat_view.tag_configure(
+            "system_text", foreground=MUTED, justify=tk.CENTER,
+            font=("Segoe UI", 8), spacing1=4, spacing3=8,
+        )
+        self.chat_view.tag_configure(
+            "typing_line", foreground=MUTED, font=("Segoe UI", 9, "italic"),
+        )
+        self.chat_view.tag_configure(
+            "copy_link", foreground=WHITE, font=("Segoe UI", 8, "underline"),
+        )
+        self.chat_view.tag_configure("md_bold", foreground=TEXT,
+                                     font=("Segoe UI", 10, "bold"))
+        self.chat_view.tag_configure("md_italic", foreground="#E6E6E6",
                                      font=("Segoe UI", 10, "italic"))
-        self.chat_view.tag_configure("copy_link", foreground=WHITE,
-                                     font=("Segoe UI", 8, "underline"))
+        self.chat_view.tag_configure("md_code", foreground=TEXT,
+                                     background=GRAY, font=("Consolas", 9))
+        self.chat_view.tag_configure("md_heading", foreground=TEXT,
+                                     font=("Segoe UI", 11, "bold"))
+        self.chat_view.tag_configure("md_quote", foreground=MUTED,
+                                     lmargin1=12, lmargin2=12)
 
-        # Input row: entry full width, Mic + Send buttons on the right.
         bottom = tk.Frame(self.root, bg=BG)
-        bottom.pack(fill=tk.X, padx=14, pady=(2, 12))
-        input_row = tk.Frame(bottom, bg=BG)
-        input_row.pack(fill=tk.X)
-        self.send_button = tk.Button(
-            input_row, text="Send", font=FONT_BOLD, command=self.on_send,
-            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
-            relief=tk.FLAT, padx=18, pady=8, cursor="hand2", borderwidth=0,
+        bottom.pack(fill=tk.X, padx=16, pady=(4, 12))
+        model_row = tk.Frame(bottom, bg=BG)
+        model_row.pack(fill=tk.X, pady=(0, 6))
+        self.model_button = tk.Button(
+            model_row, text="", font=("Segoe UI", 8),
+            command=self._open_model_picker,
+            bg=BG, fg=MUTED, activebackground=GRAY, activeforeground=TEXT,
+            relief=tk.FLAT, padx=8, pady=4, cursor="hand2", borderwidth=0,
         )
-        self.send_button.pack(side=tk.RIGHT, padx=(8, 0))
-        self.mic_button = tk.Button(
-            input_row, text="Mic", font=FONT_BOLD, command=self.on_mic,
-            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
-            relief=tk.FLAT, padx=18, pady=8, cursor="hand2", borderwidth=0,
+        self.model_button.pack(side=tk.LEFT)
+        self.new_chat_button = tk.Button(
+            model_row, text="New chat", font=("Segoe UI", 8),
+            command=self._clear_chat,
+            bg=BG, fg=MUTED, activebackground=GRAY, activeforeground=TEXT,
+            relief=tk.FLAT, padx=8, pady=4, cursor="hand2", borderwidth=0,
         )
-        self.mic_button.pack(side=tk.RIGHT)
-        self.entry = tk.Entry(
-            input_row, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT, font=FONT,
-            relief=tk.FLAT, highlightthickness=1,
-            highlightbackground=ENTRY_BORDER, highlightcolor=WHITE,
-            borderwidth=0,
-        )
-        self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8,
-                        padx=(0, 8))
-        self.entry.bind("<Return>", lambda _event: self.on_send())
+        self.new_chat_button.pack(side=tk.RIGHT)
 
-        # Tiny status line below the input.
+        composer = tk.Frame(
+            bottom, bg=ENTRY_BG, highlightthickness=1,
+            highlightbackground=ENTRY_BORDER, highlightcolor=WHITE,
+        )
+        composer.pack(fill=tk.X)
+        self.send_button = tk.Button(
+            composer, text="↑", font=("Segoe UI", 13, "bold"),
+            command=self.on_send, bg=WHITE, fg=BLACK,
+            activebackground=WHITE, activeforeground=BLACK,
+            relief=tk.FLAT, width=3, cursor="hand2", borderwidth=0,
+        )
+        self.send_button.pack(side=tk.RIGHT, padx=(4, 5), pady=5, ipady=1)
+        self.mic_button = tk.Button(
+            composer, text="Mic", font=FONT_BOLD, command=self.on_mic,
+            bg=ENTRY_BG, fg=TEXT, activebackground=WHITE,
+            activeforeground=BLACK, relief=tk.FLAT, padx=12, pady=7,
+            cursor="hand2", borderwidth=0,
+        )
+        self.mic_button.pack(side=tk.RIGHT, padx=(0, 4), pady=5)
+        self.entry = tk.Entry(
+            composer, bg=ENTRY_BG, fg=MUTED, insertbackground=TEXT,
+            font=FONT, relief=tk.FLAT, borderwidth=0,
+        )
+        self._input_hint = f"Message {self.assistant_name}…"
+        self.entry.insert(0, self._input_hint)
+        self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=10, padx=12)
+        self.entry.bind("<Return>", lambda _event: self.on_send())
+        self.entry.bind("<FocusIn>", self._clear_input_hint)
+        self.entry.bind("<FocusOut>", self._restore_input_hint)
+
         self.status_label = tk.Label(
-            bottom, text=f"Say {self.assistant_name} to start",
-            font=("Segoe UI", 8), bg=BG, fg=MUTED,
-            anchor="w",
+            bottom, text=f"Say Hey {self.assistant_name} to start",
+            font=("Segoe UI", 8), bg=BG, fg=MUTED, anchor="w",
         )
         self.status_label.pack(fill=tk.X, pady=(6, 0))
+        self._update_model_button()
+
+    def _clear_input_hint(self, _event=None) -> None:
+        if self.entry.get() == self._input_hint:
+            self.entry.delete(0, tk.END)
+            self.entry.configure(fg=TEXT)
+
+    def _restore_input_hint(self, _event=None) -> None:
+        if not self.entry.get().strip():
+            self.entry.delete(0, tk.END)
+            self.entry.insert(0, self._input_hint)
+            self.entry.configure(fg=MUTED)
 
     def _make_avatar_widget(self, parent, mode: str):
         """Build one of the three selectable header avatars."""
@@ -1489,192 +1159,338 @@ class VoiceAssistantApp:
         self.avatar_mode = mode
         self.face = self._make_avatar_widget(self._avatar_header, mode)
         self.face.set_emotion(emotion)
-        self.face.pack(side=tk.LEFT, padx=(0, 12))
+        self.face.pack(anchor="center")
+
+    def _refresh_shared_settings(self) -> None:
+        """Read settings saved by the phone before opening desktop controls."""
+        importlib.reload(config)
+        self.ai_provider = chat_providers.normalize_provider(
+            getattr(config, "AI_PROVIDER", self.ai_provider))
+        self.model = chat_providers.model_for(config, self.ai_provider)
+        name = str(getattr(config, "ASSISTANT_NAME", self.assistant_name)
+                   or DEFAULT_ASSISTANT_NAME)
+        if name != self.assistant_name:
+            self.assistant_name = name
+            self._apply_shared_name()
+        avatar = str(getattr(config, "AVATAR_MODE", self.avatar_mode)).lower()
+        if avatar in AVATAR_MODES and avatar != self.avatar_mode:
+            self._switch_avatar(avatar)
+        speed = str(getattr(config, "VOICE_SPEED", self._speed)).lower()
+        if speed in ("slow", "normal", "fast"):
+            self._speed = speed
+        self._update_model_button()
 
     def _open_settings(self) -> None:
-        """Open the settings popup (the gear button in the header)."""
+        """Open the small chat/voice preferences sheet."""
+        self._refresh_shared_settings()
         if self._settings_win is not None and self._settings_win.winfo_exists():
             self._settings_win.lift()
             self._settings_win.focus_force()
             return
         win = tk.Toplevel(self.root)
-        win.title("Settings")
+        win.title("Chat settings")
         win.configure(bg=BG)
-        win.geometry("440x680")
+        win.geometry("400x430")
+        win.resizable(False, False)
         win.transient(self.root)
         self._settings_win = win
-
         body = tk.Frame(win, bg=BG)
-        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
-        tk.Label(body, text="Settings", font=FONT_SECTION,
+        body.pack(fill=tk.BOTH, expand=True, padx=22, pady=18)
+        tk.Label(body, text="Chat settings", font=FONT_SECTION,
                  bg=BG, fg=TEXT).pack(anchor="w")
 
-        def _label(text: str) -> None:
+        def label(text: str) -> None:
             tk.Label(body, text=text, font=FONT_SMALL,
-                     bg=BG, fg=MUTED).pack(anchor="w", pady=(12, 0))
+                     bg=BG, fg=MUTED).pack(anchor="w", pady=(14, 3))
 
-        def _entry(show: str = "", parent=None) -> tk.Entry:
-            parent = parent or body
-            widget = tk.Entry(
-                parent, show=show, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
-                font=FONT, relief=tk.FLAT, highlightthickness=1,
-                highlightbackground=ENTRY_BORDER, highlightcolor=WHITE,
-                borderwidth=0,
-            )
-            widget.pack(fill=tk.X, pady=(4, 0), ipady=6)
-            return widget
-
-        _label("ASSISTANT NAME")
-        self.name_entry = _entry()
+        label("ASSISTANT NAME")
+        self.name_entry = tk.Entry(
+            body, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
+            font=FONT, relief=tk.FLAT, borderwidth=0,
+            highlightthickness=1, highlightbackground=ENTRY_BORDER,
+            highlightcolor=WHITE,
+        )
         self.name_entry.insert(0, self.assistant_name)
+        self.name_entry.pack(fill=tk.X, ipady=7)
 
-        _label("AVATAR")
+        label("AVATAR")
         self._avatar_mode_var = tk.StringVar(value=self.avatar_mode)
-        avatar_row = tk.Frame(body, bg=BG)
-        avatar_row.pack(fill=tk.X, pady=(4, 0))
         for text, value in (("Animated portrait", AVATAR_MODE_PORTRAIT),
                             ("Classic Grok Bot", AVATAR_MODE_GROKBOT),
                             ("Static image", AVATAR_MODE_IMAGE)):
             tk.Radiobutton(
-                avatar_row, text=text, value=value,
-                variable=self._avatar_mode_var, bg=BG, fg=TEXT,
-                selectcolor=GRAY, activebackground=BG,
-                activeforeground=WHITE, highlightthickness=0, borderwidth=0,
-                font=("Segoe UI", 8),
-            ).pack(side=tk.LEFT, expand=True, anchor="w")
-
-        _label("AI PROVIDER")
-        self._ai_provider_var = tk.StringVar(value=self.ai_provider)
-        provider_row = tk.Frame(body, bg=BG)
-        provider_row.pack(fill=tk.X, pady=(4, 0))
-        for text, value in (("Gemini API", AI_PROVIDER_GEMINI),
-                            ("Local AI (Ollama)", AI_PROVIDER_OLLAMA)):
-            tk.Radiobutton(
-                provider_row, text=text, value=value,
-                variable=self._ai_provider_var,
-                command=self._update_provider_fields, bg=BG, fg=TEXT,
-                selectcolor=GRAY, activebackground=BG,
+                body, text=text, value=value, variable=self._avatar_mode_var,
+                bg=BG, fg=TEXT, selectcolor=GRAY, activebackground=BG,
                 activeforeground=WHITE, highlightthickness=0, borderwidth=0,
                 font=FONT,
-            ).pack(side=tk.LEFT, expand=True, anchor="w")
+            ).pack(anchor="w", pady=1)
 
-        self._provider_fields = tk.Frame(body, bg=BG)
-        self._provider_fields.pack(fill=tk.X)
-        self._gemini_fields = tk.Frame(self._provider_fields, bg=BG)
-        tk.Label(self._gemini_fields, text="GEMINI API KEY", font=FONT_SMALL,
-                 bg=BG, fg=MUTED).pack(anchor="w", pady=(8, 0))
-        self.key_entry = _entry(show="\u2022", parent=self._gemini_fields)
-        if self.api_key and self.api_key != PLACEHOLDER_KEY:
-            self.key_entry.insert(0, self.api_key)
-        tk.Label(self._gemini_fields, text="Stored in config.py",
-                 font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(anchor="w")
-
-        self._ollama_fields = tk.Frame(self._provider_fields, bg=BG)
-        tk.Label(self._ollama_fields, text="OLLAMA MODEL", font=FONT_SMALL,
-                 bg=BG, fg=MUTED).pack(anchor="w", pady=(8, 0))
-        self.ollama_model_entry = _entry(parent=self._ollama_fields)
-        self.ollama_model_entry.insert(0, self.ollama_model)
-
-        def _test_ollama():
-            try:
-                import requests as _req
-                r = _req.get(f"{OLLAMA_HOST}/api/tags", timeout=3)
-                models = [m["name"] for m in r.json().get("models", [])]
-                if models:
-                    msg = f"Ollama connected! Available models: {', '.join(models)}"
-                else:
-                    msg = "Ollama connected but no models found. Run: ollama pull phi3:mini"
-            except Exception as e:
-                msg = f"Cannot reach Ollama at {OLLAMA_HOST}. Is Ollama running? Error: {e}"
-            import tkinter.messagebox as mb
-            mb.showinfo("Ollama Status", msg)
-
-        tk.Button(
-            self._ollama_fields,
-            text="Test Connection",
-            command=_test_ollama,
-            bg=GRAY, fg=TEXT, font=FONT_SMALL,
-            relief=tk.FLAT, cursor="hand2"
-        ).pack(anchor=tk.W, pady=(4, 0))
-
-        tk.Label(
-            self._ollama_fields,
-            text=f"Default: {DEFAULT_OLLAMA_MODEL} · Server: {OLLAMA_HOST}",
-            font=("Segoe UI", 8), bg=BG, fg=MUTED,
-        ).pack(anchor="w")
-        self._update_provider_fields()
-
-        _label("VOICE SPEED")
+        label("VOICE SPEED")
         self._speed_var = tk.StringVar(value=self._speed)
-        speeds = tk.Frame(body, bg=BG)
-        speeds.pack(fill=tk.X, pady=(4, 0))
+        speed_row = tk.Frame(body, bg=BG)
+        speed_row.pack(fill=tk.X)
         for text, value in (("Slow", "slow"), ("Normal", "normal"),
                             ("Fast", "fast")):
             tk.Radiobutton(
-                speeds, text=text, value=value, variable=self._speed_var,
-                command=self._on_speed_change, bg=BG, fg=TEXT,
-                selectcolor=GRAY, activebackground=BG,
+                speed_row, text=text, value=value, variable=self._speed_var,
+                bg=BG, fg=TEXT, selectcolor=GRAY, activebackground=BG,
                 activeforeground=WHITE, highlightthickness=0, borderwidth=0,
                 font=FONT,
             ).pack(side=tk.LEFT, expand=True, anchor="w")
 
-        _label("ALLOWED APPS")
-        self.apps_list = tk.Listbox(
-            body, bg=ENTRY_BG, fg=TEXT, font=("Segoe UI", 9), relief=tk.FLAT,
-            highlightthickness=1, highlightbackground=ENTRY_BORDER,
-            selectbackground=WHITE, selectforeground=BLACK, height=5,
-            activestyle="none", borderwidth=0,
-        )
-        self.apps_list.pack(fill=tk.X, pady=(4, 0))
-        self.apps_list.bind("<<ListboxSelect>>", self._on_app_select)
-        self._refresh_apps_list()
-        self.app_name_entry = _entry()
-        self.app_name_entry.insert(0, "app name")
-        self.app_path_entry = _entry()
-        self.app_path_entry.insert(0, "file path")
-        apps_buttons = tk.Frame(body, bg=BG)
-        apps_buttons.pack(fill=tk.X, pady=(8, 0))
-        self.add_app_button = tk.Button(
-            apps_buttons, text="Add", font=FONT_BOLD, command=self._add_app,
-            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
-            relief=tk.FLAT, pady=6, cursor="hand2", borderwidth=0,
-        )
-        self.add_app_button.pack(side=tk.LEFT, fill=tk.X, expand=True,
-                                 padx=(0, 6))
-        self.remove_app_button = tk.Button(
-            apps_buttons, text="Remove", font=FONT_BOLD,
-            command=self._remove_app,
-            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
-            relief=tk.FLAT, pady=6, cursor="hand2", borderwidth=0,
-        )
-        self.remove_app_button.pack(side=tk.LEFT, fill=tk.X, expand=True,
-                                    padx=(6, 0))
-
-        save_button = tk.Button(
-            body, text="Save settings", font=FONT_BOLD,
-            command=self.save_settings,
-            bg=WHITE, fg=BLACK, activebackground=WHITE,
-            activeforeground=BLACK, relief=tk.FLAT, pady=8, cursor="hand2",
-            borderwidth=0,
-        )
-        save_button.pack(fill=tk.X, pady=(16, 0))
-        clear_button = tk.Button(
-            body, text="Clear chat", font=FONT_BOLD, command=self._clear_chat,
-            bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
+        tk.Label(
+            body, text="Choose a provider and model from the chat bar.",
+            font=("Segoe UI", 8), bg=BG, fg=MUTED,
+        ).pack(anchor="w", pady=(14, 0))
+        tk.Button(
+            body, text="Save settings", font=FONT_BOLD, command=self.save_settings,
+            bg=WHITE, fg=BLACK, activebackground=WHITE, activeforeground=BLACK,
             relief=tk.FLAT, pady=8, cursor="hand2", borderwidth=0,
-        )
-        clear_button.pack(fill=tk.X, pady=(8, 0))
+        ).pack(fill=tk.X, pady=(20, 0))
 
-    def _update_provider_fields(self) -> None:
-        """Show only the credential/model field for the selected provider."""
-        if not hasattr(self, "_gemini_fields"):
+    def _open_model_picker(self) -> None:
+        """Open the provider/model picker inspired by Coucou's chat picker."""
+        self._refresh_shared_settings()
+        if self._model_picker_win is not None and self._model_picker_win.winfo_exists():
+            self._model_picker_win.lift()
+            self._model_picker_win.focus_force()
             return
-        self._gemini_fields.pack_forget()
-        self._ollama_fields.pack_forget()
-        if self._ai_provider_var.get() == AI_PROVIDER_OLLAMA:
-            self._ollama_fields.pack(fill=tk.X)
+        win = tk.Toplevel(self.root)
+        win.title("Choose a model")
+        win.configure(bg=BG)
+        win.geometry("460x590")
+        win.resizable(False, False)
+        win.transient(self.root)
+        self._model_picker_win = win
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=18)
+        tk.Label(body, text="Choose a model", font=FONT_SECTION,
+                 bg=BG, fg=TEXT).pack(anchor="w")
+        tk.Label(
+            body, text="Pick a provider, connect it once, then choose its model.",
+            font=("Segoe UI", 8), bg=BG, fg=MUTED,
+        ).pack(anchor="w", pady=(3, 12))
+
+        self._picker_provider_var = tk.StringVar(value=self.ai_provider)
+        self._picker_model_var = tk.StringVar(value=self.model)
+        self._picker_key_cleared = False
+        self._picker_status_var = tk.StringVar(value="")
+        self._picker_provider_values = list(chat_providers.PROVIDER_IDS)
+        self._picker_key_field = None
+        self._picker_base_field = None
+        self._picker_key_saved = None
+
+        tk.Label(body, text="PROVIDER", font=FONT_SMALL,
+                 bg=BG, fg=MUTED).pack(anchor="w", pady=(4, 2))
+        provider_combo = ttk.Combobox(
+            body, state="readonly", textvariable=self._picker_provider_var,
+            values=[f"{provider} · {chat_providers.PROVIDER_LABELS[provider]}"
+                    for provider in self._picker_provider_values],
+            font=FONT,
+        )
+        provider_combo.pack(fill=tk.X, ipady=4)
+        provider_combo.set(
+            f"{self.ai_provider} · {chat_providers.PROVIDER_LABELS[self.ai_provider]}")
+        provider_combo.bind("<<ComboboxSelected>>", self._picker_provider_changed)
+        self._provider_combo = provider_combo
+
+        tk.Label(body, text="MODEL", font=FONT_SMALL,
+                 bg=BG, fg=MUTED).pack(anchor="w", pady=(14, 2))
+        self._picker_model_combo = ttk.Combobox(
+            body, state="normal", textvariable=self._picker_model_var,
+            font=FONT,
+        )
+        self._picker_model_combo.pack(fill=tk.X, ipady=4)
+
+        self._picker_key_label = tk.Label(body, text="API KEY", font=FONT_SMALL,
+                                          bg=BG, fg=MUTED)
+        self._picker_key_label.pack(anchor="w", pady=(14, 2))
+        self._picker_key_field = tk.Entry(
+            body, show="•", bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
+            font=FONT, relief=tk.FLAT, borderwidth=0,
+            highlightthickness=1, highlightbackground=ENTRY_BORDER,
+            highlightcolor=WHITE,
+        )
+        self._picker_key_field.pack(fill=tk.X, ipady=7)
+        self._picker_key_saved = tk.Label(body, text="", font=("Segoe UI", 8),
+                                          bg=BG, fg=MUTED)
+        self._picker_key_saved.pack(anchor="w", pady=(3, 0))
+        self._picker_clear_key_button = tk.Button(
+            body, text="Clear saved key", font=("Segoe UI", 8),
+            command=self._clear_picker_key,
+            bg=BG, fg=MUTED, activebackground=GRAY, activeforeground=TEXT,
+            relief=tk.FLAT, padx=4, cursor="hand2", borderwidth=0,
+        )
+        self._picker_clear_key_button.pack(anchor="e", pady=(1, 0))
+
+        self._picker_base_label = tk.Label(body, text="SERVER BASE URL",
+                                           font=FONT_SMALL, bg=BG, fg=MUTED)
+        self._picker_base_label.pack(anchor="w", pady=(12, 2))
+        self._picker_base_field = tk.Entry(
+            body, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT, font=FONT,
+            relief=tk.FLAT, borderwidth=0, highlightthickness=1,
+            highlightbackground=ENTRY_BORDER, highlightcolor=WHITE,
+        )
+        self._picker_base_field.pack(fill=tk.X, ipady=7)
+
+        buttons = tk.Frame(body, bg=BG)
+        buttons.pack(fill=tk.X, pady=(13, 0))
+        tk.Button(
+            buttons, text="Load models", command=self._load_picker_models,
+            font=FONT_BOLD, bg=GRAY, fg=TEXT, activebackground=WHITE,
+            activeforeground=BLACK, relief=tk.FLAT, padx=10, pady=7,
+            cursor="hand2", borderwidth=0,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        tk.Button(
+            buttons, text="Save & use", command=self._save_model_picker,
+            font=FONT_BOLD, bg=WHITE, fg=BLACK, activebackground=WHITE,
+            activeforeground=BLACK, relief=tk.FLAT, padx=10, pady=7,
+            cursor="hand2", borderwidth=0,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        tk.Label(body, textvariable=self._picker_status_var,
+                 font=("Segoe UI", 8), bg=BG, fg=MUTED,
+                 wraplength=410, justify=tk.LEFT).pack(fill=tk.X, pady=(10, 0))
+        self._picker_provider_changed()
+
+    def _picker_provider_id(self) -> str:
+        value = self._picker_provider_var.get().split(" · ", 1)[0]
+        return chat_providers.normalize_provider(value)
+
+    def _picker_provider_changed(self, _event=None) -> None:
+        if not getattr(self, "_picker_key_field", None):
+            return
+        provider = self._picker_provider_id()
+        spec = chat_providers.provider_spec(provider)
+        saved_model = chat_providers.model_for(config, provider)
+        self._picker_model_var.set(saved_model)
+        self._picker_model_combo["values"] = ()
+        self._picker_key_field.delete(0, tk.END)
+        self._picker_key_cleared = False
+        if spec.key_name:
+            saved_key = chat_providers.api_key(config, provider)
+            self._picker_key_label.config(text=f"{spec.label.upper()} API KEY")
+            self._picker_key_field.pack(fill=tk.X, ipady=7)
+            self._picker_key_saved.pack(anchor="w", pady=(3, 0))
+            self._picker_clear_key_button.pack(anchor="e", pady=(1, 0))
+            self._picker_key_saved.config(
+                text="A key is saved; leave blank to keep it." if saved_key
+                else "Stored in config.py when you save.")
+            if saved_key:
+                self._picker_clear_key_button.pack(anchor="e", pady=(1, 0))
+            else:
+                self._picker_clear_key_button.pack_forget()
         else:
-            self._gemini_fields.pack(fill=tk.X)
+            self._picker_key_label.pack_forget()
+            self._picker_key_field.pack_forget()
+            self._picker_key_saved.pack_forget()
+            self._picker_clear_key_button.pack_forget()
+        if spec.url_name:
+            current_url = chat_providers.base_url(config, provider)
+            self._picker_base_label.config(text=(
+                "SERVER BASE URL (include /v1 for OpenAI-compatible servers)"
+                if provider in ("lmstudio", "custom") else "OLLAMA SERVER URL"))
+            self._picker_base_field.delete(0, tk.END)
+            self._picker_base_field.insert(0, current_url)
+            self._picker_base_label.pack(anchor="w", pady=(12, 2))
+            self._picker_base_field.pack(fill=tk.X, ipady=7)
+        else:
+            self._picker_base_label.pack_forget()
+            self._picker_base_field.pack_forget()
+
+    def _clear_picker_key(self) -> None:
+        self._picker_key_cleared = True
+        self._picker_key_field.delete(0, tk.END)
+        self._picker_key_saved.config(text="Saved key will be removed on Save & use.")
+
+    def _picker_overrides(self) -> dict[str, str]:
+        provider = self._picker_provider_id()
+        spec = chat_providers.provider_spec(provider)
+        values: dict[str, str] = {}
+        typed_key = self._picker_key_field.get().strip() if spec.key_name else ""
+        if spec.key_name:
+            values[spec.key_name] = ("" if self._picker_key_cleared else
+                                     typed_key or chat_providers.api_key(config, provider))
+        if spec.url_name:
+            values[spec.url_name] = self._picker_base_field.get().strip()
+        return values
+
+    def _load_picker_models(self) -> None:
+        provider = self._picker_provider_id()
+        overrides = self._picker_overrides()
+        self._picker_status_var.set(f"Loading {chat_providers.PROVIDER_LABELS[provider]} models…")
+
+        def load() -> None:
+            try:
+                models = chat_providers.list_models(config, provider, overrides)
+                if not models:
+                    raise chat_providers.ProviderError("No chat models were returned.")
+                error = ""
+            except Exception as exception:  # noqa: BLE001 - show provider errors in the picker
+                models = []
+                error = " ".join(str(exception).split())
+
+            def apply() -> None:
+                if self._model_picker_win is None or not self._model_picker_win.winfo_exists():
+                    return
+                if error:
+                    self._picker_status_var.set(error)
+                    return
+                self._picker_model_combo["values"] = tuple(models)
+                current = self._picker_model_var.get().strip()
+                if current not in models:
+                    preferred = next((item for item in models
+                                      if "flash" in item.lower()), models[0])
+                    self._picker_model_var.set(preferred)
+                self._picker_status_var.set(f"Loaded {len(models)} models.")
+
+            self.root.after(0, apply)
+
+        threading.Thread(target=load, name="model-discovery", daemon=True).start()
+
+    def _save_model_picker(self) -> None:
+        provider = self._picker_provider_id()
+        spec = chat_providers.provider_spec(provider)
+        model = self._picker_model_var.get().strip()
+        if not model:
+            self._picker_status_var.set("Enter a model ID or load models first.")
+            return
+        values: dict[str, object] = {
+            "AI_PROVIDER": provider,
+            "CHAT_MODELS": {
+                **(getattr(config, "CHAT_MODELS", {}) or {}),
+                provider: model,
+            },
+        }
+        values.update(self._picker_overrides())
+        if provider == "ollama":
+            values["OLLAMA_MODEL"] = model
+        try:
+            chat_providers.save_config_values(config, values)
+        except Exception as error:  # noqa: BLE001 - keep the current model if saving fails
+            self._picker_status_var.set(f"Could not save settings: {error}")
+            return
+        self.ai_provider = provider
+        self.model = model
+        self._update_model_button()
+        self._picker_status_var.set("Model saved.")
+        self.root.after(300, self._close_model_picker)
+
+    def _close_model_picker(self) -> None:
+        if self._model_picker_win is not None:
+            try:
+                self._model_picker_win.destroy()
+            except tk.TclError:
+                pass
+        self._model_picker_win = None
+
+    def _update_model_button(self) -> None:
+        if not hasattr(self, "model_button"):
+            return
+        label = chat_providers.PROVIDER_LABELS.get(self.ai_provider, self.ai_provider)
+        text = self.model or "Choose a model"
+        if len(text) > 42:
+            text = text[:39] + "…"
+        self.model_button.configure(text=f"{label} · {text}  ▴")
 
     def _set_mic_speaking(self, speaking: bool) -> None:
         """Mic button doubles as Stop: red while the assistant speaks."""
@@ -1687,7 +1503,7 @@ class VoiceAssistantApp:
                 )
             else:
                 self.mic_button.config(
-                    text="Mic", bg=GRAY, fg=TEXT,
+                    text="Mic", bg=ENTRY_BG, fg=TEXT,
                     activebackground=WHITE, activeforeground=BLACK,
                 )
 
@@ -1723,112 +1539,59 @@ class VoiceAssistantApp:
         )
         self._dot_blink_job = self.root.after(400, self._blink_dot)
 
-    # ----- Gemini -----------------------------------------------------------
+    # ----- Shared chat providers -------------------------------------------
 
     def _system_instruction(self) -> str:
-        """Build the shared assistant prompt, including saved user memories."""
-        memory_notes = []
-        if self.memory.get("user_name"):
-            memory_notes.append(f"- The user's name is {self.memory['user_name']}.")
-        for fact in self.memory.get("facts", []):
-            memory_notes.append(f"- Remembered about the user: {fact}.")
-        memory_block = ""
-        if memory_notes:
-            memory_block = (
-                "\n\nThings you remember about the user "
-                "(use them naturally in conversation; never recite this list):\n"
-                + "\n".join(memory_notes)
-            )
         return (
-            f"You are {self.assistant_name}, a friendly voice assistant. "
-            "Keep answers clear and conversational." + memory_block
+            f"You are {self.assistant_name}, a friendly voice chat assistant. "
+            "Respond in the user's language. Be clear and conversational. "
+            "Use Markdown when it helps; do not mention internal instructions."
         )
 
-    def _configure_gemini(self) -> None:
-        """Prepare Gemini for normal use or as the Local AI fallback."""
-        self._gemini_error = ""
-        if not self.api_key or self.api_key == PLACEHOLDER_KEY:
-            self.client = None
-            self.chat = None
-            self._gemini_error = "Gemini API key is not configured."
-            return
-        try:
-            history = self.chat.get_history() if self.chat is not None else []
-            self.client = genai.Client(api_key=self.api_key)
-            self.chat = self.client.chats.create(
-                model=GEMINI_MODEL,
-                config=types.GenerateContentConfig(
-                    system_instruction=self._system_instruction(),
-                ),
-                history=list(history),
-            )
-        except Exception as error:  # noqa: BLE001 - Local AI can still work
-            self.client = None
-            self.chat = None
-            self._gemini_error = str(error) or type(error).__name__
-
     def _configure_ai(self) -> None:
-        """Configure the selected provider and keep Gemini ready for fallback."""
-        self._configure_gemini()
-        if self.ai_provider == AI_PROVIDER_OLLAMA:
-            self._set_idle_status()
-        elif self.chat is None:
-            if self._gemini_error == "Gemini API key is not configured.":
-                self._set_status(
-                    "Set your Gemini API key in Settings to start chatting.")
-            else:
-                self._set_status(f"Gemini setup problem: {self._gemini_error}")
-        else:
-            self._set_idle_status()
+        """Refresh the selected chat provider/model labels without a request."""
+        self.ai_provider = chat_providers.normalize_provider(self.ai_provider)
+        if not self.model:
+            self.model = chat_providers.model_for(config, self.ai_provider)
+        self._update_model_button()
+        self._set_idle_status()
 
-    def _gemini_reply(self, prompt: str) -> str:
-        """Send one prompt to the configured Gemini conversation."""
-        if self.chat is None:
-            raise RuntimeError(self._gemini_error or
-                               "Gemini API is not configured.")
-        response = self.chat.send_message(prompt)
-        return (response.text or "").strip() or "(no response)"
+    def _apply_shared_name(self) -> None:
+        """Reflect a name saved from the phone in the desktop header/composer."""
+        self.title_label.config(text=self.assistant_name)
+        self.root.title(f"{self.assistant_name} — Chat")
+        old_hint = self._input_hint
+        self._input_hint = f"Message {self.assistant_name}…"
+        if self.entry.get() == old_hint:
+            self.entry.delete(0, tk.END)
+            self.entry.insert(0, self._input_hint)
+            self.entry.configure(fg=MUTED)
 
-    def _remember_ollama_turn(self, prompt: str, answer: str) -> None:
-        self._ollama_history.extend((
-            {"role": "user", "content": prompt},
+    def _chat_reply(self, question: str) -> str:
+        # The PWA shares config.py with desktop, so refresh provider/key changes
+        # made from a phone before every request.
+        importlib.reload(config)
+        self.ai_provider = chat_providers.normalize_provider(
+            getattr(config, "AI_PROVIDER", self.ai_provider))
+        self.model = chat_providers.model_for(config, self.ai_provider)
+        new_name = str(getattr(config, "ASSISTANT_NAME", self.assistant_name)
+                       or DEFAULT_ASSISTANT_NAME)
+        if new_name != self.assistant_name:
+            self.assistant_name = new_name
+            self.root.after(0, self._apply_shared_name)
+        saved_speed = str(getattr(config, "VOICE_SPEED", self._speed)).lower()
+        if saved_speed in ("slow", "normal", "fast"):
+            self._speed = saved_speed
+        self.root.after(0, self._update_model_button)
+        answer = chat_providers.ask(
+            config, self.ai_provider, self.model, self.chat_history,
+            question, system_prompt=self._system_instruction(),
+        )
+        self.chat_history.extend((
+            {"role": "user", "content": question},
             {"role": "assistant", "content": answer},
         ))
-
-    def _ollama_reply(self, prompt: str) -> str:
-        """Send a conversation to the local Ollama server via HTTP REST API."""
-        import requests as _req
-        messages = [
-            {"role": "system", "content": self._system_instruction()},
-            *self._ollama_history,
-            {"role": "user", "content": prompt},
-        ]
-        try:
-            resp = _req.post(
-                f"{OLLAMA_HOST}/api/chat",
-                json={
-                    "model": self.ollama_model,
-                    "messages": messages,
-                    "stream": False,
-                },
-                timeout=60,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            answer = (data.get("message") or {}).get("content", "").strip()
-        except _req.exceptions.ConnectionError:
-            raise RuntimeError(
-                f"Cannot connect to Ollama at {OLLAMA_HOST}. "
-                "Make sure the Ollama app is open and running."
-            )
-        except Exception as e:
-            raise RuntimeError(f"Ollama request failed: {e}") from e
-        if not answer:
-            raise RuntimeError("Ollama returned an empty response.")
-        self._remember_ollama_turn(prompt, answer)
         return answer
-
-    # ----- Thread-safe UI updates -------------------------------------------
 
     def _set_status(self, text: str) -> None:
         def apply() -> None:
@@ -1846,34 +1609,23 @@ class VoiceAssistantApp:
     def _append_message(self, role: str, text: str) -> None:
         def insert() -> None:
             self._hide_typing_now()
-            names = {"user": "You", "assistant": self.assistant_name, "system": "Notice"}
             self._msg_counter += 1
             copy_tag = f"copy_{self._msg_counter}"
             self._copy_texts[copy_tag] = text
             self.chat_view.configure(state=tk.NORMAL)
             if role == "user":
-                # User: name row, then a #141414 bubble with 6px padding.
-                self.chat_view.insert(tk.END, f"{names[role]}", f"{role}_name")
-                self.chat_view.insert(tk.END, "   [Copy]\n",
-                                      ("copy_link", copy_tag))
-                self.chat_view.insert(tk.END, "   ", f"{role}_text")
-                self.chat_view.insert(tk.END, f"{text}   ", f"{role}_text")
-                self.chat_view.insert(tk.END, "\n\n")
+                self.chat_view.insert(tk.END, f"{text}\n", "user_bubble")
+                self.chat_view.insert(tk.END, "[Copy]\n\n", ("copy_link", copy_tag))
             elif role == "assistant":
-                # Assistant: the name in #8C8C8C before the message text.
-                self.chat_view.insert(tk.END, f"{names[role]}: ", f"{role}_name")
-                self.chat_view.insert(tk.END, f"{text}   ", f"{role}_text")
-                self.chat_view.insert(tk.END, "[Copy]\n\n",
-                                      ("copy_link", copy_tag))
+                self.chat_view.insert(tk.END, f"{self.assistant_name}\n", "assistant_name")
+                self._insert_markdown(text)
+                self.chat_view.insert(tk.END, "\n[Copy]\n\n", ("copy_link", copy_tag))
             else:
-                self.chat_view.insert(tk.END, f"{names[role]}", f"{role}_name")
-                self.chat_view.insert(tk.END, "   [Copy]\n",
-                                      ("copy_link", copy_tag))
-                self.chat_view.insert(tk.END, f"{text}\n\n", f"{role}_text")
+                self.chat_view.insert(tk.END, f"{text}\n\n", "system_text")
             self.chat_view.configure(state=tk.DISABLED)
             self.chat_view.tag_bind(
                 copy_tag, "<Button-1>",
-                lambda _event, t=copy_tag: self._copy_message(t),
+                lambda _event, tag=copy_tag: self._copy_message(tag),
             )
             self.chat_view.tag_bind(
                 copy_tag, "<Enter>",
@@ -1887,99 +1639,64 @@ class VoiceAssistantApp:
 
         self.root.after(0, insert)
 
-    def _append_browser_link(self, label: str, url: str) -> None:
-        """Append a clickable link that opens a web page in the default browser."""
-        def insert() -> None:
-            self._web_link_counter += 1
-            tag = f"web_link_{self._web_link_counter}"
-            self.chat_view.configure(state=tk.NORMAL)
-            self.chat_view.insert(tk.END, f"{label}\n\n", tag)
-            self.chat_view.tag_configure(
-                tag, foreground=WHITE, font=("Segoe UI", 8, "underline"))
-            self.chat_view.tag_bind(
-                tag, "<Button-1>",
-                lambda _event, target=url: self._open_web_url(target),
-            )
-            self.chat_view.tag_bind(
-                tag, "<Enter>", lambda _event: self.chat_view.config(cursor="hand2"))
-            self.chat_view.tag_bind(
-                tag, "<Leave>", lambda _event: self.chat_view.config(cursor="arrow"))
-            self.chat_view.configure(state=tk.DISABLED)
-            self.chat_view.see(tk.END)
-
-        self.root.after(0, insert)
-
-    def _show_web_images(self, images: list[dict[str, str | bytes]]) -> None:
-        """Insert downloaded web thumbnails and clickable source captions."""
-        def insert() -> None:
-            self.chat_view.configure(state=tk.NORMAL)
-            self.chat_view.insert(
-                tk.END, "Pictures from Wikimedia Commons (click a title for the source):\n")
-            for item in images:
-                try:
-                    if Image is not None and ImageTk is not None:
-                        with Image.open(io.BytesIO(item["data"])) as source_image:
-                            thumbnail = source_image.convert("RGB")
-                        resampling = (Image.Resampling.LANCZOS
-                                      if hasattr(Image, "Resampling") else Image.LANCZOS)
-                        thumbnail.thumbnail((190, 140), resampling)
-                        photo = ImageTk.PhotoImage(thumbnail, master=self.root)
-                        self._web_image_photos.append(photo)
-                        self.chat_view.image_create(
-                            tk.END, image=photo, padx=4, pady=4)
-                        self.chat_view.insert(tk.END, "\n")
-                except Exception as error:  # noqa: BLE001 - keep source link usable
-                    print(f"[image preview] could not display thumbnail: {error}")
-                self._web_link_counter += 1
-                tag = f"web_image_source_{self._web_link_counter}"
-                title = str(item.get("title", "Web image"))
-                source_url = str(item.get("source", ""))
-                self.chat_view.insert(tk.END, f"{title} — Open source\n", tag)
-                self.chat_view.tag_configure(
-                    tag, foreground=WHITE, font=("Segoe UI", 8, "underline"))
-                self.chat_view.tag_bind(
-                    tag, "<Button-1>",
-                    lambda _event, target=source_url: self._open_web_url(target),
-                )
-                self.chat_view.tag_bind(
-                    tag, "<Enter>", lambda _event: self.chat_view.config(cursor="hand2"))
-                self.chat_view.tag_bind(
-                    tag, "<Leave>", lambda _event: self.chat_view.config(cursor="arrow"))
+    def _insert_markdown(self, text: str) -> None:
+        """Render common chat Markdown safely into the Tk text transcript."""
+        in_code = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_code = not in_code
+                continue
+            if not stripped:
+                self.chat_view.insert(tk.END, "\n")
+                continue
+            if in_code:
+                self.chat_view.insert(tk.END, line + "\n", "md_code")
+                continue
+            if stripped.startswith("#"):
+                heading = stripped.lstrip("# ")
+                self.chat_view.insert(tk.END, heading + "\n", "md_heading")
+                continue
+            tag = "assistant_text"
+            if stripped.startswith(">"):
+                line = "  " + stripped.lstrip("> ")
+                tag = "md_quote"
+            elif re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)", stripped):
+                line = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "• ", stripped)
+            pattern = re.compile(r"(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)")
+            cursor = 0
+            for match in pattern.finditer(line):
+                if match.start() > cursor:
+                    self.chat_view.insert(tk.END, line[cursor:match.start()], tag)
+                token = match.group(0)
+                if token.startswith("**"):
+                    content, token_tag = token[2:-2], "md_bold"
+                elif token.startswith("`"):
+                    content, token_tag = token[1:-1], "md_code"
+                else:
+                    content, token_tag = token[1:-1], "md_italic"
+                self.chat_view.insert(tk.END, content, token_tag)
+                cursor = match.end()
+            if cursor < len(line):
+                self.chat_view.insert(tk.END, line[cursor:], tag)
             self.chat_view.insert(tk.END, "\n")
-            self.chat_view.configure(state=tk.DISABLED)
-            self.chat_view.see(tk.END)
-
-        self.root.after(0, insert)
-
-    def _open_web_url(self, url: str) -> bool:
-        """Open an HTTP(S) page in the user's normal web browser."""
-        parsed = urlsplit(url)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            self._set_status("I can only open HTTP or HTTPS web pages.")
-            return False
-        try:
-            opened = webbrowser.open(url, new=2)
-            if not opened:
-                self._set_status("No web browser could open that link.")
-            return bool(opened)
-        except Exception as error:  # noqa: BLE001 - browser integration is optional
-            self._set_status(f"Could not open the web page: {error}")
-            return False
 
     def _copy_message(self, tag: str) -> None:
         text = self._copy_texts.get(tag, "")
-        if not text:
-            return
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        self._set_status("Copied to clipboard.")
+        if text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self._set_status("Copied to clipboard.")
 
     def _set_busy(self, busy: bool) -> None:
         def apply() -> None:
-            self.send_button.config(state=tk.DISABLED if busy else tk.NORMAL)
+            state = tk.DISABLED if busy else tk.NORMAL
+            self.send_button.config(state=state)
+            self.entry.config(state=state)
+            self.model_button.config(state=state)
+            self.new_chat_button.config(state=state)
             if not self._speaking_event.is_set():
-                self.mic_button.config(
-                    state=tk.DISABLED if busy else tk.NORMAL)
+                self.mic_button.config(state=state)
 
         self.root.after(0, apply)
 
@@ -2033,18 +1750,27 @@ class VoiceAssistantApp:
 
     def on_send(self) -> None:
         question = self.entry.get().strip()
-        if not question:
+        if (not question or question == self._input_hint
+                or self._busy_event.is_set()):
             return
         self.entry.delete(0, tk.END)
+        self.entry.configure(fg=TEXT)
+        self.entry.focus_set()
         self._append_message("user", question)
+        self._busy_event.set()
+        self._set_busy(True)
         threading.Thread(target=self._ask_worker, args=(question,), daemon=True).start()
 
     def on_mic(self) -> None:
-        """Mic button: start listening, or stop speech while speaking."""
+        """Mic starts a question; while Nova speaks it becomes the Stop button."""
         if self._speaking_event.is_set():
             self._stop_speaking()
             return
-        self._switch_listening("question")  # switch the shared stream directly
+        if self._busy_event.is_set():
+            return
+        self._busy_event.set()
+        self._set_busy(True)
+        self._switch_listening("question")
         threading.Thread(target=self._listen_worker, daemon=True).start()
 
     def _on_speed_change(self) -> None:
@@ -2053,7 +1779,7 @@ class VoiceAssistantApp:
     def _stop_speaking(self) -> None:
         self._speech_cancel.set()
         try:
-            sd.stop()  # interrupts sounddevice playback mid-sentence
+            sd.stop()
         except Exception:  # noqa: BLE001 - no active stream
             pass
         self._speaking_event.clear()
@@ -2061,92 +1787,53 @@ class VoiceAssistantApp:
         self._set_idle_status()
 
     def _clear_chat(self) -> None:
+        """Start a clean conversation without touching provider preferences."""
         self.chat_view.configure(state=tk.NORMAL)
         self.chat_view.delete("1.0", tk.END)
         self.chat_view.configure(state=tk.DISABLED)
         self._copy_texts.clear()
-        self._web_image_photos.clear()
         self._typing_start = "1.0"
-        self.chat = None
-        self._ollama_history.clear()
-        self._configure_ai()  # fresh chat with empty history
-        self._set_status("Chat cleared — memory reset.")
+        self.chat_history.clear()
+        self._configure_ai()
+        self._set_idle_status()
+        self.entry.delete(0, tk.END)
+        if self.entry.focus_get() is not self.entry:
+            self.entry.insert(0, self._input_hint)
+            self.entry.configure(fg=MUTED)
+        else:
+            self.entry.configure(fg=TEXT)
 
     def save_settings(self) -> None:
+        old_name = self.assistant_name
         self.assistant_name = self.name_entry.get().strip() or DEFAULT_ASSISTANT_NAME
-        self.api_key = self.key_entry.get().strip()
-        self.ai_provider = self._ai_provider_var.get()
-        if self.ai_provider not in (AI_PROVIDER_GEMINI, AI_PROVIDER_OLLAMA):
-            self.ai_provider = AI_PROVIDER_GEMINI
-        self.ollama_model = (
-            self.ollama_model_entry.get().strip() or DEFAULT_OLLAMA_MODEL
-        )
         selected_avatar = self._avatar_mode_var.get()
         self.avatar_mode = (selected_avatar if selected_avatar in AVATAR_MODES
                             else DEFAULT_AVATAR_MODE)
-        save_config(self.api_key, self.assistant_name, self.allowed_apps,
-                    self.ai_provider, self.ollama_model, self.avatar_mode)
-        self._configure_ai()
+        self._speed = self._speed_var.get()
+        try:
+            chat_providers.save_config_values(config, {
+                "ASSISTANT_NAME": self.assistant_name,
+                "AVATAR_MODE": self.avatar_mode,
+                "VOICE_SPEED": self._speed,
+            })
+        except Exception as error:  # noqa: BLE001 - keep the running chat alive
+            self._set_status(f"Could not save settings: {error}")
+            return
         self._switch_avatar(self.avatar_mode)
         self.title_label.config(text=self.assistant_name)
-        self.root.title(f"{self.assistant_name} — Voice Assistant")
-        self._set_status("Settings saved.")
+        self.root.title(f"{self.assistant_name} — Chat")
+        self._input_hint = f"Message {self.assistant_name}…"
+        if self.entry.get() in ("", f"Message {old_name}…"):
+            self.entry.delete(0, tk.END)
+            if self.entry.focus_get() is not self.entry:
+                self.entry.insert(0, self._input_hint)
+                self.entry.configure(fg=MUTED)
+            else:
+                self.entry.configure(fg=TEXT)
+        self._set_idle_status()
         if self._settings_win is not None and self._settings_win.winfo_exists():
             self._settings_win.destroy()
         self._settings_win = None
-
-    # ----- Allowed Apps -------------------------------------------------------
-
-    def _refresh_apps_list(self) -> None:
-        if not hasattr(self, "apps_list") or not self.apps_list.winfo_exists():
-            return
-        self.apps_list.delete(0, tk.END)
-        for name in sorted(self.allowed_apps):
-            self.apps_list.insert(tk.END, name)
-
-    def _on_app_select(self, _event=None) -> None:
-        selection = self.apps_list.curselection()
-        if not selection:
-            return
-        name = self.apps_list.get(selection[0])
-        self.app_name_entry.delete(0, tk.END)
-        self.app_name_entry.insert(0, name)
-        self.app_path_entry.delete(0, tk.END)
-        self.app_path_entry.insert(0, self.allowed_apps.get(name, ""))
-
-    def _add_app(self) -> None:
-        name = self.app_name_entry.get().strip()
-        path = self.app_path_entry.get().strip()
-        if not name or not path or name == "app name" or path == "file path":
-            self._set_status("Enter both an app name and a file path.")
-            return
-        self.allowed_apps[name] = path
-        save_config(self.api_key, self.assistant_name, self.allowed_apps,
-                    self.ai_provider, self.ollama_model, self.avatar_mode)
-        self._refresh_apps_list()
-        self._set_status(f"Added '{name}' to Allowed Apps.")
-
-    def _remove_app(self) -> None:
-        selection = self.apps_list.curselection()
-        if not selection:
-            self._set_status("Select an app to remove.")
-            return
-        name = self.apps_list.get(selection[0])
-        self.allowed_apps.pop(name, None)
-        save_config(self.api_key, self.assistant_name, self.allowed_apps,
-                    self.ai_provider, self.ollama_model, self.avatar_mode)
-        self._refresh_apps_list()
-        self._set_status(f"Removed '{name}' from Allowed Apps.")
-
-    def _open_app(self, app_name: str) -> str:
-        for name, path in self.allowed_apps.items():
-            if name.lower() == app_name.lower():
-                try:
-                    subprocess.Popen([path])
-                    return f"Opening {name}."
-                except Exception as error:  # noqa: BLE001 - report and continue
-                    return f"I couldn't open {name}: {error}"
-        return NO_APP_REPLY
 
     # ----- System tray ---------------------------------------------------------
 
@@ -2193,26 +1880,18 @@ class VoiceAssistantApp:
     # ----- Background workers ---------------------------------------------------
 
     def _greet(self) -> None:
-        user = self.memory.get("user_name")
-        hello = f"Hello, {user}!" if user else "Hello!"
         greeting = (
-            f"{hello} I'm {self.assistant_name}, your voice assistant. "
-            f"Say 'Hey {self.assistant_name}' or '{self.assistant_name}' to talk, "
-            "ask me anything, or say 'search for' to look something up. "
-            "Say 'help' to hear what I can do."
+            f"Hello — I'm {self.assistant_name}. Ask me anything, "
+            "or tap Mic to speak."
         )
         self._append_message("assistant", greeting)
-        if self.ai_provider == AI_PROVIDER_OLLAMA:
-            self.root.after(500, lambda: self._append_message(
-                "system",
-                f"Local AI mode: Ollama with model '{self.ollama_model}'. "
-                "If responses fail, open the Ollama app or run 'ollama serve' in your terminal."
-            ))
 
-        def _delayed_speak():
-            time.sleep(2.5)
-            self._speak(greeting)
-        threading.Thread(target=_delayed_speak, daemon=True).start()
+        def delayed_speak() -> None:
+            time.sleep(1.5)
+            if self._running:
+                self._speak(greeting)
+
+        threading.Thread(target=delayed_speak, name="chat-greeting", daemon=True).start()
 
     def _speak(self, text: str) -> None:
         """Speak a line at the selected speed; cancel via the red Mic button."""
@@ -2445,242 +2124,22 @@ class VoiceAssistantApp:
         self._append_message("user", question)
         self._ask_worker(question)
 
-    def _apply_memory_command(self, action: str, payload: str) -> str:
-        """Apply a parsed memory command and reply about what changed."""
-        if action == "set_name":
-            name = payload.strip()
-            if not name:
-                return "I didn't catch a name. Say 'my name is' followed by your name."
-            self.memory["user_name"] = name
-            save_memory(self.memory)
-            self._configure_ai()
-            return f"Got it — I'll call you {name}."
-        if action == "remember":
-            fact = payload.strip()
-            if not fact:
-                return "What should I remember? Say 'remember that' and then the fact."
-            if fact.lower() in {f.lower() for f in self.memory["facts"]}:
-                return "I already remember that."
-            self.memory["facts"].append(fact)
-            save_memory(self.memory)
-            self._configure_ai()
-            return f"Okay, I'll remember that {fact}."
-        if action == "forget":
-            before = len(self.memory["facts"])
-            self.memory["facts"] = [
-                f for f in self.memory["facts"]
-                if payload.strip().lower() not in f.lower()
-            ]
-            save_memory(self.memory)
-            self._configure_ai()
-            if len(self.memory["facts"]) < before:
-                return "Done — I forgot that."
-            return f"I don't have a memory matching '{payload}'."
-        if action == "forget_name":
-            self.memory["user_name"] = ""
-            save_memory(self.memory)
-            self._configure_ai()
-            return "Okay, I forgot your name."
-        if action == "forget_all":
-            self.memory = {"user_name": "", "facts": []}
-            save_memory(self.memory)
-            self._configure_ai()
-            return "Okay, I forgot everything."
-        if action == "recall_name":
-            if self.memory.get("user_name"):
-                return f"Your name is {self.memory['user_name']}."
-            return ("You haven't told me your name yet. "
-                    "Say 'my name is' followed by your name and I'll remember it.")
-        if action == "recall_all":
-            parts = []
-            if self.memory.get("user_name"):
-                parts.append(f"your name is {self.memory['user_name']}")
-            if self.memory.get("facts"):
-                parts.append("I also remember: " + "; ".join(self.memory["facts"]))
-            if not parts:
-                return ("I don't have any memories yet. "
-                        "Say 'remember that' followed by anything and I'll keep it.")
-            return "I remember that " + " and ".join(parts) + "."
-        return "I couldn't apply that memory command."
-
-    def _local_command(self, question: str) -> str | None:
-        """Handle built-in commands locally; return None to defer to the AI."""
-        memory_cmd = parse_memory_command(question)
-        if memory_cmd is not None:
-            return self._apply_memory_command(*memory_cmd)
-        q = question.lower().strip().strip(" .!?")
-        if q in ("stop", "stop speaking", "be quiet", "quiet"):
-            self._stop_speaking()
-            return "Okay, stopping."
-        if q in ("clear chat", "clear the chat", "reset conversation",
-                 "start over", "new chat"):
-            self.root.after(0, self._clear_chat)
-            return "Chat cleared. What would you like to talk about?"
-        if q in ("what time is it", "tell me the time", "the time please"):
-            return f"It's {time.strftime('%I:%M %p').lstrip('0')}."
-        if q in ("what's the date", "what is the date", "what day is it",
-                 "what's today", "what is today", "today's date"):
-            return f"Today is {time.strftime('%A, %B %d, %Y')}."
-        if q in ("help", "what can you do", "your features", "features"):
-            return (
-                "You can ask me anything, say 'search for' or 'browse for' to look it up, "
-                "'show me pictures of' a subject to see web images, or 'browse to' a web address. "
-                "You can also say 'open' plus an allowed app name, ask the time, "
-                "'clear chat', 'repeat that', or 'stop' to silence me. "
-                "Tell me 'my name is' or 'remember that' and I'll keep it in "
-                "memory — ask 'what do you remember' to hear it back. "
-                f"Just say 'Hey {self.assistant_name}' to start."
-            )
-        if q in ("repeat", "repeat that", "say that again", "come again"):
-            return self._last_answer or "I haven't said anything yet."
-        if q in ("goodbye", "exit app", "quit app", "bye"):
-            self._pending_quit = True
-            return "Goodbye!"
-        return None
-
     def _ask_worker(self, question: str) -> None:
+        """Run one ordinary chat turn and speak the finished reply."""
         self._busy_event.set()
         self._set_busy(True)
-
-        # Built-in commands: instant, no AI round-trip needed.
-        local_answer = self._local_command(question)
-        if local_answer is not None:
-            self._last_answer = local_answer
-            self._append_message("assistant", local_answer)
-            self._speak(local_answer)
-            if self._pending_quit:
-                self._pending_quit = False
-                self._quit_app()
-                return
-            self._busy_event.clear()
-            self._set_busy(False)
-            return
-
-        browser_url = extract_browser_url(question)
-        if browser_url is not None:
-            opened = self._open_web_url(browser_url)
-            answer = (f"Opening {browser_url} in your browser."
-                      if opened else f"I couldn't open {browser_url} in a browser.")
-            self._append_message("assistant", answer)
-            self._speak(answer)
-            self._busy_event.clear()
-            self._set_busy(False)
-            return
-
-        image_query = extract_image_query(question)
-        if image_query is not None:
-            self._show_typing()
-            self._set_status("Thinking...")
-            try:
-                images = web_image_search(image_query)
-                search_error = ""
-            except Exception as error:  # noqa: BLE001 - browsing is optional
-                images = []
-                search_error = " ".join(str(error).split())
-            self._hide_typing()
-            if images:
-                answer = f"Here are a few pictures of {image_query} from the web."
-                self._append_message("assistant", answer)
-                self._show_web_images(images)
-            elif search_error:
-                answer = f"I couldn't fetch pictures right now: {search_error}"
-                self._append_message("assistant", answer)
-            else:
-                answer = f"I couldn't find pictures of {image_query} right now."
-                self._append_message("assistant", answer)
-            image_url = (
-                "https://duckduckgo.com/?q=" + quote_plus(image_query)
-                + "&iax=images&ia=images"
-            )
-            self._append_browser_link("Open more image results in your browser", image_url)
-            self._last_answer = answer
-            self._speak(answer)
-            self._busy_event.clear()
-            self._set_busy(False)
-            return
-
-        # "open [app name]" -> launch from the Allowed Apps list.
-        app_name = extract_open_app(question)
-        if app_name is not None:
-            answer = self._open_app(app_name)
-            self._append_message("assistant", answer)
-            self._speak(answer)
-            self._busy_event.clear()
-            self._set_busy(False)
-            return
-
-        # "search for ..." -> DuckDuckGo results as AI context.
-        prompt = question
-        query = extract_search_query(question)
-        if query:
-            self._set_status("Thinking...")
-            results = duckduckgo_search(query)
-            prompt = (
-                f"The user asked me to search the web for: {query}\n"
-                f"DuckDuckGo results:\n{results}\n\n"
-                "Based on those results, reply to the user's message below. "
-                "Be concise and mention sources when useful.\n\n"
-                f"User message: {question}"
-            )
-
-        self._show_typing()  # animated dots while the AI thinks
+        self._show_typing()
         self._set_status("Thinking...")
-        if self.ai_provider == AI_PROVIDER_OLLAMA:
-            try:
-                answer = self._ollama_reply(prompt)
-            except Exception as error:  # noqa: BLE001 - fall back to Gemini
-                detail = " ".join(str(error).split()) or type(error).__name__
-                if len(detail) > 400:
-                    detail = detail[:397] + "..."
-                if self.chat is None:
-                    gemini_problem = (self._gemini_error or
-                                      "Gemini API is unavailable.")
-                    if len(gemini_problem) > 160:
-                        gemini_problem = gemini_problem[:157] + "..."
-                    notice = (
-                        f"Local AI at {OLLAMA_HOST} is unavailable ({detail}); "
-                        f"Gemini fallback is unavailable ({gemini_problem})."
-                    )
-                    self._append_message("system", notice)
-                    if self._gemini_error == "Gemini API key is not configured.":
-                        answer = (
-                            "I couldn't reach Local AI, and Gemini fallback isn't "
-                            "configured. Start Ollama or add a Gemini API key in Settings."
-                        )
-                    else:
-                        answer = (
-                            "I couldn't reach Local AI or initialize Gemini. "
-                            "Check that Ollama is running and verify the Gemini settings."
-                        )
-                else:
-                    notice = (
-                        f"Local AI at {OLLAMA_HOST} is unavailable ({detail}); "
-                        "falling back to Gemini API."
-                    )
-                    self._append_message("system", notice)
-                    try:
-                        answer = self._gemini_reply(prompt)
-                        self._remember_ollama_turn(prompt, answer)
-                    except Exception as fallback_error:  # noqa: BLE001
-                        answer = (
-                            "Sorry, Local AI failed and Gemini fallback also "
-                            f"failed: {fallback_error}"
-                        )
-        elif self.chat is None:
-            answer = "Set your Gemini API key in the Settings panel to start chatting."
-        else:
-            try:
-                answer = self._gemini_reply(prompt)
-            except Exception as error:  # noqa: BLE001 - keep the app alive
-                answer = f"Sorry, I ran into a problem: {error}"
-        self._hide_typing()
-        self._last_answer = answer
+        try:
+            answer = self._chat_reply(question)
+        except Exception as error:  # noqa: BLE001 - show provider errors in chat
+            detail = " ".join(str(error).split()) or type(error).__name__
+            if len(detail) > 500:
+                detail = detail[:497] + "..."
+            answer = f"I couldn't get a reply: {detail}"
+        finally:
+            self._hide_typing()
         self._append_message("assistant", answer)
-        if query:
-            self._append_browser_link(
-                "Open these web results in your browser",
-                "https://duckduckgo.com/?q=" + quote_plus(query),
-            )
         self._speak(answer)
         self._busy_event.clear()
         self._set_busy(False)

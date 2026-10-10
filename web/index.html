@@ -4,57 +4,82 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
-<title>Nova</title>
+<meta name="description" content="Nova voice chat">
+<title>Nova — Voice Chat</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <svg viewBox="0 0 100 100" width="52" height="52" aria-hidden="true">
-      <g id="faceBob">
-        <circle cx="53" cy="51.8" r="42" fill="#8C8C8C"/>
-        <circle cx="50" cy="50" r="42" fill="#FAFAFA"/>
-        <ellipse id="blushL" cx="25.6" cy="67.6" rx="5.2" ry="3.6" fill="#8C8C8C" opacity="0.55"/>
-        <ellipse id="blushR" cx="74.4" cy="67.6" rx="5.2" ry="3.6" fill="#8C8C8C" opacity="0.55"/>
-        <line id="eyeL" x1="34.5" y1="43.4" x2="34.5" y2="60.6" stroke="#000" stroke-width="8.6" stroke-linecap="round"/>
-        <line id="eyeR" x1="65.5" y1="43.4" x2="65.5" y2="60.6" stroke="#000" stroke-width="8.6" stroke-linecap="round"/>
-      </g>
-    </svg>
-    <div class="titles">
+  <header class="topbar">
+    <button class="icon-btn left-action" id="gearBtn" title="Chat settings" aria-label="Chat settings">⚙</button>
+    <div class="brand">
+      <svg class="avatar" viewBox="0 0 100 100" aria-hidden="true">
+        <g id="faceBob">
+          <circle cx="53" cy="51.8" r="42" fill="#8C8C8C"/>
+          <circle cx="50" cy="50" r="42" fill="#FAFAFA"/>
+          <ellipse id="blushL" cx="25.6" cy="67.6" rx="5.2" ry="3.6" fill="#8C8C8C" opacity="0.55"/>
+          <ellipse id="blushR" cx="74.4" cy="67.6" rx="5.2" ry="3.6" fill="#8C8C8C" opacity="0.55"/>
+          <line id="eyeL" x1="34.5" y1="43.4" x2="34.5" y2="60.6" stroke="#000" stroke-width="8.6" stroke-linecap="round"/>
+          <line id="eyeR" x1="65.5" y1="43.4" x2="65.5" y2="60.6" stroke="#000" stroke-width="8.6" stroke-linecap="round"/>
+        </g>
+      </svg>
       <div class="title" id="titleName">Nova</div>
-      <div class="subtitle">voice assistant</div>
+      <div class="subtitle">voice chat</div>
     </div>
-    <div class="spacer"></div>
-    <span class="dot" id="statusDot"></span>
-    <button class="icon-btn" id="wakeBtn" title="Wake word listener">&#9789;</button>
-    <button class="icon-btn" id="gearBtn" title="Settings">&#9881;</button>
+    <div class="right-actions">
+      <span class="dot" id="statusDot" aria-label="Status"></span>
+      <button class="icon-btn" id="wakeBtn" title="Toggle wake word" aria-label="Toggle wake word">◐</button>
+    </div>
   </header>
 
-  <main class="chat" id="chat"></main>
+  <main class="chat" id="chat" aria-live="polite" aria-label="Conversation"></main>
 
   <footer>
-    <div class="input-row">
-      <input class="entry" id="entry" placeholder="Message Nova…" autocomplete="off">
-      <button class="btn mic" id="micBtn">Mic</button>
-      <button class="btn" id="sendBtn">Send</button>
+    <div class="model-row">
+      <button class="model-btn" id="modelBtn" title="Choose provider and model">Choose a model ▴</button>
+      <button class="new-chat" id="clearBtn" title="Start a new chat">New chat</button>
+    </div>
+    <div class="composer">
+      <textarea class="entry" id="entry" rows="1" placeholder="Message Nova…" autocomplete="off" aria-label="Message Nova"></textarea>
+      <button class="btn mic" id="micBtn" aria-label="Start voice input">Mic</button>
+      <button class="btn send" id="sendBtn" aria-label="Send message">↑</button>
     </div>
     <div class="status" id="status">Ready</div>
   </footer>
 
   <div class="sheet-backdrop hidden" id="sheetBackdrop">
-    <div class="sheet" role="dialog" aria-label="Settings">
+    <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
       <div class="sheet-head">
-        <div class="sheet-title">Settings</div>
-        <button class="icon-btn" id="closeSheet">&#10005;</button>
+        <div class="sheet-title" id="sheetTitle">Chat settings</div>
+        <button class="icon-btn close-btn" id="closeSheet" aria-label="Close settings">×</button>
       </div>
 
-      <label class="field-label" for="setKey">GEMINI API KEY</label>
-      <input class="field" id="setKey" type="password" placeholder="YOUR_GEMINI_API_KEY_HERE">
-      <div class="hint">Stored in config.py on the server PC.</div>
-
       <label class="field-label" for="setName">ASSISTANT NAME</label>
-      <input class="field" id="setName" type="text">
+      <input class="field" id="setName" type="text" maxlength="40" autocomplete="off">
+
+      <label class="field-label" for="providerSelect">PROVIDER</label>
+      <select class="field" id="providerSelect"></select>
+
+      <label class="field-label" for="modelField">MODEL ID</label>
+      <div class="model-field-row">
+        <input class="field" id="modelField" list="modelOptions" autocomplete="off" placeholder="Enter a model ID">
+        <datalist id="modelOptions"></datalist>
+        <button class="btn utility" id="loadModels">Load</button>
+      </div>
+      <div class="hint" id="modelHint">Choose a provider, then load its available models.</div>
+
+      <div id="keySection">
+        <label class="field-label" for="setKey" id="keyLabel">API KEY</label>
+        <input class="field" id="setKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep the saved key">
+        <div class="field-actions"><span class="hint" id="keyHint"></span><button class="text-button" id="clearKey">Clear key</button></div>
+      </div>
+
+      <div id="urlSection">
+        <label class="field-label" for="baseUrl" id="urlLabel">SERVER BASE URL</label>
+        <input class="field" id="baseUrl" type="url" inputmode="url" autocomplete="url">
+        <div class="hint">For OpenAI-compatible servers, use the base address ending in /v1.</div>
+      </div>
 
       <div class="field-label">VOICE SPEED</div>
       <div class="radios" id="speedRadios">
@@ -63,20 +88,12 @@
         <label><input type="radio" name="speed" value="fast"> Fast</label>
       </div>
 
-      <div class="field-label">ALLOWED APPS</div>
-      <div class="apps-list" id="appsList"></div>
-      <div class="apps-row">
-        <input class="field" id="appName" placeholder="app name">
-        <input class="field" id="appPath" placeholder="file path">
+      <div class="settings-actions">
+        <button class="btn primary" id="saveBtn">Save & use</button>
+        <button class="btn" id="cancelBtn">Cancel</button>
       </div>
-      <div class="apps-row">
-        <button class="btn" id="addApp">Add</button>
-        <button class="btn" id="removeApp">Remove</button>
-      </div>
-
-      <button class="btn primary" id="saveBtn">Save settings</button>
-      <button class="btn" id="clearBtn">Clear chat</button>
-    </div>
+      <div class="settings-status" id="settingsStatus" role="status"></div>
+    </section>
   </div>
 
   <script src="/app.js"></script>

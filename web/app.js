@@ -1,156 +1,282 @@
 'use strict';
 
-/* Nova — mobile web client: chat, browser speech, wake word, phone TTS. */
+/* Nova — chat, browser voice input, and phone speech output. */
 
 const $ = (id) => document.getElementById(id);
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const DEFAULT_MODELS = {
+  anthropic: 'claude-opus-5',
+  google: 'gemini-3.5-flash-lite',
+  openai: 'gpt-4o',
+  openrouter: 'openrouter/auto',
+  ollama: 'phi3:mini',
+  lmstudio: '',
+  custom: '',
+};
+const KEY_PROVIDERS = new Set(['anthropic', 'google', 'openai', 'openrouter', 'custom']);
+const URL_PROVIDERS = new Set(['ollama', 'lmstudio', 'custom']);
 
 const state = {
-  name: 'Nova', apiReady: false, speed: 'normal', apps: {},
-  user_name: '',
+  name: 'Nova', speed: 'normal', provider: 'google', model: 'gemini-3.5-flash-lite',
+  models: {}, providers: [], keysSaved: {}, baseUrls: {}, apiReady: false,
 };
 
-let busy = false;        // waiting for the server
-let speaking = false;    // speechSynthesis is playing
-let listening = false;   // question recognition is running
-let wakeWanted = false;  // user toggled the wake listener on
+let busy = false;
+let speaking = false;
+let listening = false;
+let wakeWanted = false;
 let wakeRunning = false;
-let wakeRec = null, listenRec = null;
+let wakeRec = null;
+let listenRec = null;
 let speakToken = 0;
-let selectedApp = null;
+let typingEl = null;
+let clearKeyRequested = false;
 
-/* ---------- status line, dot, and face ---------- */
+/* ---------- status line, dot, and avatar animation ---------- */
 
 const face = {
-  bob: $('faceBob'),
-  eyeL: $('eyeL'), eyeR: $('eyeR'),
+  bob: $('faceBob'), eyeL: $('eyeL'), eyeR: $('eyeR'),
   blushL: $('blushL'), blushR: $('blushR'),
 };
-let faceEmotion = 'idle', faceT = 0, blinkIn = 3.0, blinkLeft = 0, lastTs = 0;
+let faceEmotion = 'idle';
+let faceT = 0;
+let blinkIn = 3.0;
+let blinkLeft = 0;
+let lastTs = 0;
 
 function inferEmotion(text) {
   const s = text.toLowerCase();
   if (s.includes('listening')) return 'listening';
-  if (s.includes('thinking') || s.includes('searching')) return 'thinking';
+  if (s.includes('thinking')) return 'thinking';
   if (s.includes('speaking')) return 'talking';
-  if (['mic failed', "can't understand", 'sorry', 'failed', 'denied'].some(b => s.includes(b))) return 'sad';
-  if (['copied', 'saved', 'cleared', 'added', 'removed', 'got it', "i'll remember"].some(g => s.includes(g))) return 'happy';
+  if (['mic failed', 'could not', 'couldn\'t', 'sorry', 'failed'].some((part) => s.includes(part))) return 'sad';
+  if (['saved', 'cleared'].some((part) => s.includes(part))) return 'happy';
   return 'idle';
 }
 
 function readyStatus() {
-  return `Ready — say "Hey ${state.name}" to talk`;
+  return `Ready — say "Hey ${state.name}" or tap Mic`;
 }
 
 function setStatus(text) {
   $('status').textContent = text;
-  const emo = inferEmotion(text);
-  faceEmotion = emo;
+  faceEmotion = inferEmotion(text);
   const dot = $('statusDot');
   dot.className = 'dot';
-  if (emo === 'listening') dot.classList.add('listening');
-  else if (emo === 'talking') dot.classList.add('speaking');
-  else if (emo === 'thinking') dot.classList.add('thinking');
+  if (faceEmotion === 'listening') dot.classList.add('listening');
+  else if (faceEmotion === 'talking') dot.classList.add('speaking');
+  else if (faceEmotion === 'thinking') dot.classList.add('thinking');
 }
 
 function faceFrame(ts) {
   const dt = lastTs ? Math.min((ts - lastTs) / 1000, 0.1) : 0.08;
-  lastTs = ts; faceT += dt;
+  lastTs = ts;
+  faceT += dt;
   blinkIn -= dt;
   if (blinkLeft > 0) blinkLeft -= dt;
-  else if (blinkIn <= 0) { blinkLeft = 0.12; blinkIn = 2.6 + Math.random() * 3.0; }
+  else if (blinkIn <= 0) {
+    blinkLeft = 0.12;
+    blinkIn = 2.6 + Math.random() * 3.0;
+  }
 
-  const emo = faceEmotion;
-  const breath = emo === 'talking' ? 0 : Math.sin(faceT * 0.8);
-  const dy = breath * 0.6, sq = breath * 0.004;
+  const emotion = faceEmotion;
+  const breath = emotion === 'talking' ? 0 : Math.sin(faceT * 0.8);
+  const dy = breath * 0.6;
+  const scale = breath * 0.004;
   face.bob.setAttribute('transform',
-    `translate(50 50) scale(${(1 + sq).toFixed(4)} ${(1 - sq).toFixed(4)}) translate(-50 -50) translate(0 ${dy.toFixed(2)})`);
+    `translate(50 50) scale(${(1 + scale).toFixed(4)} ${(1 - scale).toFixed(4)}) translate(-50 -50) translate(0 ${dy.toFixed(2)})`);
 
   const blinking = blinkLeft > 0;
-  let w = 8.6, h = 8.6, shear = 0, dx = 0, ey = 52;
-  if (emo === 'listening') { w *= 1.18; h *= 1.24; ey -= 1.8; }
-  else if (emo === 'thinking') { dx = Math.sin(faceT * 0.9) * 1.8 - 1.2; ey -= 1.6; }
-  else if (emo === 'sad') { w *= 0.86; h *= 0.9; ey += 1.8; shear = -1.4; }
-  else if (emo === 'happy') { w *= 1.32; h *= 0.78; ey -= 0.8; shear = 2.0; }
-  else if (emo === 'talking') { h *= 0.85 + 0.4 * Math.abs(Math.sin(faceT * 9)); }
-  else { dx = Math.sin(faceT * 0.5) * 0.6; }
-  if (blinking) h = w * 0.12;
+  let width = 8.6, height = 8.6, shear = 0, dx = 0, eyeY = 52;
+  if (emotion === 'listening') { width *= 1.18; height *= 1.24; eyeY -= 1.8; }
+  else if (emotion === 'thinking') { dx = Math.sin(faceT * 0.9) * 1.8 - 1.2; eyeY -= 1.6; }
+  else if (emotion === 'sad') { width *= 0.86; height *= 0.9; eyeY += 1.8; shear = -1.4; }
+  else if (emotion === 'happy') { width *= 1.32; height *= 0.78; eyeY -= 0.8; shear = 2.0; }
+  else if (emotion === 'talking') height *= 0.85 + 0.4 * Math.abs(Math.sin(faceT * 9));
+  else dx = Math.sin(faceT * 0.5) * 0.6;
+  if (blinking) height = width * 0.12;
 
   for (const [eye, side] of [[face.eyeL, -1], [face.eyeR, 1]]) {
-    const ex = 50 + side * 15.5 + dx;
+    const x = 50 + side * 15.5 + dx;
     const tip = -side * shear;
-    eye.setAttribute('x1', (ex - tip).toFixed(2)); eye.setAttribute('y1', (ey - h).toFixed(2));
-    eye.setAttribute('x2', (ex + tip).toFixed(2)); eye.setAttribute('y2', (ey + h).toFixed(2));
-    eye.setAttribute('stroke-width', w.toFixed(2));
+    eye.setAttribute('x1', (x - tip).toFixed(2));
+    eye.setAttribute('y1', (eyeY - height).toFixed(2));
+    eye.setAttribute('x2', (x + tip).toFixed(2));
+    eye.setAttribute('y2', (eyeY + height).toFixed(2));
+    eye.setAttribute('stroke-width', width.toFixed(2));
   }
-  const boost = emo === 'happy' ? 1.15 : 1.0;
+  const blushBoost = emotion === 'happy' ? 1.15 : 1;
   for (const blush of [face.blushL, face.blushR]) {
-    blush.setAttribute('rx', (5.2 * boost).toFixed(2));
-    blush.setAttribute('ry', (3.6 * boost).toFixed(2));
+    blush.setAttribute('rx', (5.2 * blushBoost).toFixed(2));
+    blush.setAttribute('ry', (3.6 * blushBoost).toFixed(2));
   }
   requestAnimationFrame(faceFrame);
 }
 requestAnimationFrame(faceFrame);
 
-/* ---------- chat window ---------- */
+/* ---------- safe chat rendering ---------- */
 
-function addMsg(role, text) {
-  const el = document.createElement('div');
-  el.className = 'msg msg-' + role;
-  const name = role === 'user' ? 'You' : role === 'system' ? 'Notice' : state.name;
-  const meta = document.createElement('div');
-  meta.className = 'meta';
-  meta.textContent = name;
+function appendInline(parent, text) {
+  const token = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g;
+  let offset = 0;
+  for (const match of text.matchAll(token)) {
+    if (match.index > offset) parent.append(document.createTextNode(text.slice(offset, match.index)));
+    const value = match[0];
+    const element = value.startsWith('**') ? document.createElement('strong')
+      : value.startsWith('`') ? document.createElement('code')
+        : document.createElement('em');
+    element.textContent = value.startsWith('**') ? value.slice(2, -2)
+      : value.startsWith('`') ? value.slice(1, -1) : value.slice(1, -1);
+    parent.append(element);
+    offset = match.index + value.length;
+  }
+  if (offset < text.length) parent.append(document.createTextNode(text.slice(offset)));
+}
+
+function renderMarkdown(target, text) {
+  const fragment = document.createDocumentFragment();
+  const lines = String(text).split(/\r?\n/);
+  let list = null;
+  let codeLines = [];
+  let inCode = false;
+  const closeList = () => { list = null; };
+  const appendCode = () => {
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.textContent = codeLines.join('\n');
+    pre.append(code);
+    fragment.append(pre);
+    codeLines = [];
+  };
+
+  for (const line of lines) {
+    if (line.trim().startsWith('```')) {
+      closeList();
+      if (inCode) appendCode();
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) { codeLines.push(line); continue; }
+    const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (bullet || ordered) {
+      if (!list || list.tagName !== (bullet ? 'UL' : 'OL')) {
+        list = document.createElement(bullet ? 'ul' : 'ol');
+        fragment.append(list);
+      }
+      const item = document.createElement('li');
+      appendInline(item, (bullet || ordered)[1]);
+      list.append(item);
+      continue;
+    }
+    closeList();
+    if (!line.trim()) continue;
+    const heading = line.match(/^\s*#{1,4}\s+(.+)$/);
+    const quote = line.match(/^\s*>\s?(.*)$/);
+    const paragraph = document.createElement(heading ? 'h3' : quote ? 'blockquote' : 'p');
+    appendInline(paragraph, (heading || quote || [null, line])[1]);
+    fragment.append(paragraph);
+  }
+  if (inCode) appendCode();
+  target.replaceChildren(fragment);
+}
+
+function addMessage(role, text) {
+  const message = document.createElement('article');
+  message.className = `message message-${role}`;
+  const header = document.createElement('div');
+  header.className = 'message-head';
+  const name = document.createElement('span');
+  name.className = 'message-name';
+  name.textContent = role === 'user' ? 'You' : role === 'assistant' ? state.name : 'Notice';
+  header.append(name);
   if (role !== 'system') {
-    const copy = document.createElement('span');
-    copy.className = 'copy';
-    copy.textContent = '[Copy]';
-    copy.addEventListener('click', () => navigator.clipboard.writeText(text));
-    meta.appendChild(copy);
+    const copy = document.createElement('button');
+    copy.className = 'copy-btn';
+    copy.type = 'button';
+    copy.textContent = 'Copy';
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(String(text));
+        copy.textContent = 'Copied';
+        setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
+      } catch (_) {
+        copy.textContent = 'Unavailable';
+      }
+    });
+    header.append(copy);
   }
   const body = document.createElement('div');
-  body.textContent = text;
-  el.appendChild(meta);
-  el.appendChild(body);
-  $('chat').appendChild(el);
+  body.className = role === 'assistant' ? 'message-body reply' : 'message-body';
+  if (role === 'assistant') renderMarkdown(body, text);
+  else body.textContent = String(text);
+  message.append(header, body);
+  $('chat').append(message);
   $('chat').scrollTop = $('chat').scrollHeight;
 }
 
-let typingEl = null;
 function showTyping() {
   hideTyping();
   typingEl = document.createElement('div');
   typingEl.className = 'typing';
-  let n = 0;
-  typingEl.textContent = `${state.name} is typing`;
-  $('chat').appendChild(typingEl);
-  const timer = setInterval(() => {
-    if (!typingEl) { clearInterval(timer); return; }
-    n = (n + 1) % 4;
-    typingEl.textContent = `${state.name} is typing${'.'.repeat(n)}`;
-    $('chat').scrollTop = $('chat').scrollHeight;
-  }, 350);
-}
-function hideTyping() {
-  if (typingEl) { typingEl.remove(); typingEl = null; }
+  typingEl.innerHTML = `<span>${escapeHTML(state.name)} is thinking</span><i></i><i></i><i></i>`;
+  $('chat').append(typingEl);
+  $('chat').scrollTop = $('chat').scrollHeight;
 }
 
-/* ---------- speech output (phone voice) ---------- */
+function hideTyping() {
+  if (typingEl) {
+    typingEl.remove();
+    typingEl = null;
+  }
+}
+
+function escapeHTML(text) {
+  return String(text).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
+/* ---------- phone speech output ---------- */
+
+function setMicSpeaking(on) {
+  const button = $('micBtn');
+  button.classList.toggle('speaking', on);
+  button.textContent = on ? 'Stop' : listening ? 'Stop' : 'Mic';
+  button.setAttribute('aria-label', on ? 'Stop speech' : listening ? 'Stop listening' : 'Start voice input');
+  button.disabled = busy && !on;
+}
+
+function setMicListening(on) {
+  const button = $('micBtn');
+  button.classList.toggle('recording', on);
+  button.textContent = on || speaking ? 'Stop' : 'Mic';
+  button.setAttribute('aria-label', on ? 'Stop listening' : speaking ? 'Stop speech' : 'Start voice input');
+  button.disabled = busy && !speaking;
+}
+
+function stopListening(restartWake = true) {
+  if (listenRec) {
+    try { listenRec.stop(); } catch (_) { /* recognition already ended */ }
+  }
+  listening = false;
+  setMicListening(false);
+  setStatus(readyStatus());
+  if (restartWake) ensureWake();
+}
 
 function speak(text) {
   if (!window.speechSynthesis) {
-    addMsg('system', 'Speech output is not supported in this browser.');
+    addMessage('system', 'Speech output is not supported in this browser.');
     return;
   }
   speechSynthesis.cancel();
   const token = ++speakToken;
-  const u = new SpeechSynthesisUtterance(text);
-  u.rate = state.speed === 'fast' ? 1.2 : state.speed === 'slow' ? 0.85 : 1.0;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = state.speed === 'fast' ? 1.2 : state.speed === 'slow' ? 0.85 : 1;
   const voices = speechSynthesis.getVoices();
-  const preferred =
-    voices.find(v => /^en/i.test(v.lang) && /female|google|natural|samantha|zira|aria/i.test(v.name)) ||
-    voices.find(v => /^en/i.test(v.lang));
-  if (preferred) u.voice = preferred;
+  const preferred = voices.find((voice) => /^en/i.test(voice.lang)) || voices[0];
+  if (preferred) utterance.voice = preferred;
   speaking = true;
   setMicSpeaking(true);
   setStatus('Speaking...');
@@ -161,123 +287,158 @@ function speak(text) {
     setStatus(readyStatus());
     ensureWake();
   };
-  u.onend = done;
-  u.onerror = done;
-  speechSynthesis.speak(u);
+  utterance.onend = done;
+  utterance.onerror = done;
+  try {
+    speechSynthesis.speak(utterance);
+  } catch (error) {
+    speaking = false;
+    setMicSpeaking(false);
+    setStatus(readyStatus());
+    addMessage('system', `Speech output failed: ${error.message || 'unsupported browser'}.`);
+  }
 }
 
-function stopSpeech() {
-  speakToken++;
+function stopSpeech(restartWake = true) {
+  speakToken += 1;
   if (window.speechSynthesis) speechSynthesis.cancel();
   speaking = false;
   setMicSpeaking(false);
   setStatus(readyStatus());
-  ensureWake();
-}
-
-function setMicSpeaking(on) {
-  const btn = $('micBtn');
-  btn.classList.toggle('speaking', on);
-  btn.textContent = on ? 'Stop' : 'Mic';
+  if (restartWake) ensureWake();
 }
 
 function beep() {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator(), gain = ctx.createGain();
-    osc.frequency.value = 880; gain.gain.value = 0.2;
-    osc.connect(gain); gain.connect(ctx.destination);
-    osc.start(); osc.stop(ctx.currentTime + 0.12);
-  } catch (err) { /* audio feedback is optional */ }
+    const context = new (window.AudioContext || window.webkitAudioContext)();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.frequency.value = 880;
+    gain.gain.value = 0.18;
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.12);
+  } catch (_) { /* optional audio feedback */ }
 }
 
-/* ---------- sending messages ---------- */
+/* ---------- send and clear ---------- */
 
 async function send(text) {
-  text = (text || '').trim();
-  if (!text) return;
-  stopSpeech();
-
-  if (/^(stop|stop speaking|be quiet|quiet)$/i.test(text)) {
-    addMsg('user', text);
-    addMsg('assistant', 'Okay, stopping.');
-    return;
-  }
-
-  addMsg('user', text);
+  text = String(text || '').trim();
+  if (!text || busy) return;
+  if (listening) stopListening(false);
+  if (wakeRunning) stopWake();
+  stopSpeech(false);
+  addMessage('user', text);
   busy = true;
+  setBusy(true);
   setStatus('Thinking...');
   showTyping();
   try {
-    const res = await fetch('/api/message', {
+    const response = await fetch('/api/message', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
     });
-    const data = await res.json();
+    const data = await response.json();
     hideTyping();
-    addMsg('assistant', data.reply || '(no response)');
-    speak(data.reply || '');
-  } catch (err) {
+    if (!response.ok) throw new Error(data.error || 'The chat request failed.');
+    const reply = data.reply || '(no response)';
+    addMessage('assistant', reply);
+    speak(reply);
+  } catch (error) {
     hideTyping();
-    addMsg('system', 'Cannot reach the server: ' + err.message);
-    setStatus(readyStatus());
+    const reply = `I couldn't reach the chat server: ${error.message}`;
+    addMessage('system', reply);
+    speak(reply);
+  } finally {
+    busy = false;
+    setBusy(false);
+    if (!speaking && !listening) setStatus(readyStatus());
+    ensureWake();
   }
-  busy = false;
 }
 
-/* ---------- speech input (browser mic) ---------- */
+function setBusy(on) {
+  $('sendBtn').disabled = on;
+  $('entry').disabled = on;
+  $('modelBtn').disabled = on;
+  $('clearBtn').disabled = on;
+  $('micBtn').disabled = on && !speaking;
+}
+
+async function clearChat() {
+  if (busy) return;
+  stopSpeech();
+  try {
+    const response = await fetch('/api/clear', { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Unable to start a new chat.');
+    $('chat').replaceChildren();
+    addMessage('system', 'New chat started.');
+  } catch (error) {
+    addMessage('system', `Couldn't clear the chat: ${error.message}`);
+  }
+  setStatus(readyStatus());
+}
+
+/* ---------- browser speech recognition ---------- */
 
 function startListening() {
   if (!SR) {
-    addMsg('system', 'Voice input is not supported in this browser — type instead.');
+    addMessage('system', 'Voice input is not supported in this browser — type instead.');
     return;
   }
-  if (listening || busy) return;
+  if (listening || busy || speaking) return;
   stopWake();
   listening = true;
+  setMicListening(true);
   setStatus('Listening...');
   try {
     listenRec = new SR();
-    listenRec.lang = 'en-US';
+    listenRec.lang = navigator.language || 'en-US';
     listenRec.interimResults = true;
     listenRec.continuous = false;
-    listenRec.onresult = (e) => {
+    listenRec.onresult = (event) => {
       let transcript = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        transcript += e.results[i][0].transcript;
+      for (let index = event.resultIndex; index < event.results.length; index++) {
+        transcript += event.results[index][0].transcript;
       }
-      if (e.results.length && e.results[e.results.length - 1].isFinal) {
+      if (event.results.length && event.results[event.results.length - 1].isFinal) {
         listening = false;
+        setMicListening(false);
         send(transcript.trim());
       }
     };
-    listenRec.onerror = (e) => {
+    listenRec.onerror = (event) => {
       listening = false;
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        addMsg('system', 'Microphone permission denied — type instead.');
-      } else {
-        addMsg('system', 'Mic failed — type instead.');
-      }
+      setMicListening(false);
+      const message = event.error === 'not-allowed' || event.error === 'service-not-allowed'
+        ? 'Microphone permission denied — type instead.'
+        : 'Mic failed — type instead.';
+      addMessage('system', message);
       setStatus(readyStatus());
       ensureWake();
     };
     listenRec.onend = () => {
       if (listening) {
         listening = false;
+        setMicListening(false);
         setStatus(readyStatus());
         ensureWake();
       }
     };
     listenRec.start();
-  } catch (err) {
+  } catch (_) {
     listening = false;
+    setMicListening(false);
+    addMessage('system', 'Mic failed — type instead.');
     setStatus(readyStatus());
-    addMsg('system', 'Mic failed — type instead.');
   }
 }
 
-/* ---------- wake word ("Hey Nova") ---------- */
+/* ---------- optional wake word ---------- */
 
 const WAKE_ONLY = ['', 'i have a question', "i've got a question", 'ive got a question',
   'question', 'yes', 'yeah', 'hello', 'hi', 'hey', 'are you there',
@@ -285,16 +446,15 @@ const WAKE_ONLY = ['', 'i have a question', "i've got a question", 'ive got a qu
 
 function wakeQuestion(text, name) {
   if (!name) return null;
-  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const strict = text.match(new RegExp(
-    `^\\s*(?:please\\s+)?(?:(?:hey(?:\\s+there)?|ok(?:ay)?|hi|hello|yo)\\s+)?${esc}\\b(?<tail>.*)$`,
-    'i'));
+    `^\\s*(?:please\\s+)?(?:(?:hey(?:\\s+there)?|ok(?:ay)?|hi|hello|yo)\\s+)?${escaped}\\b(?<tail>.*)$`, 'i'));
   if (strict) {
     const tail = (strict.groups.tail || '').trim().replace(/[ .,:!?]+$/, '');
     return WAKE_ONLY.includes(tail.toLowerCase()) ? '' : tail;
   }
-  if (new RegExp(`\\b${esc}\\b`, 'i').test(text)) {
-    return text.replace(new RegExp(`\\b(?:hey\\s+|ok(?:ay)?\\s+)?${esc}\\b`, 'i'), '').trim();
+  if (new RegExp(`\\b${escaped}\\b`, 'i').test(text)) {
+    return text.replace(new RegExp(`\\b(?:hey\\s+|ok(?:ay)?\\s+)?${escaped}\\b`, 'i'), '').trim();
   }
   return null;
 }
@@ -303,18 +463,18 @@ function startWake() {
   if (!SR || wakeRunning || listening || busy || speaking) return;
   try {
     wakeRec = new SR();
-    wakeRec.lang = 'en-US';
+    wakeRec.lang = navigator.language || 'en-US';
     wakeRec.continuous = true;
     wakeRec.interimResults = true;
-    wakeRec.onresult = (e) => {
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (!e.results[i].isFinal) continue;
-        const t = e.results[i][0].transcript.trim();
-        const q = wakeQuestion(t, state.name);
-        if (q === null) continue;
+    wakeRec.onresult = (event) => {
+      for (let index = event.resultIndex; index < event.results.length; index++) {
+        if (!event.results[index].isFinal) continue;
+        const transcript = event.results[index][0].transcript.trim();
+        const question = wakeQuestion(transcript, state.name);
+        if (question === null) continue;
         stopWake();
         beep();
-        if (q) send(q);
+        if (question) send(question);
         else startListening();
         return;
       }
@@ -330,13 +490,18 @@ function startWake() {
     wakeRec.onerror = () => { wakeRunning = false; };
     wakeRec.start();
     wakeRunning = true;
-    setStatus(`Wake word on — say "Hey ${state.name}"`);
-    setTimeout(() => { if (!listening && !busy && !speaking) setStatus(readyStatus()); }, 1600);
-  } catch (err) { wakeRunning = false; }
+    $('wakeBtn').classList.add('active');
+    setStatus(`Listening...`);
+  } catch (_) {
+    wakeRunning = false;
+    addMessage('system', 'Wake listening could not start. Use Mic or type instead.');
+  }
 }
 
 function stopWake() {
-  if (wakeRec) { try { wakeRec.stop(); } catch (err) { /* already stopped */ } }
+  if (wakeRec) {
+    try { wakeRec.stop(); } catch (_) { /* already stopped */ }
+  }
   wakeRunning = false;
 }
 
@@ -346,168 +511,238 @@ function ensureWake() {
 
 function updateWakeButton() {
   $('wakeBtn').classList.toggle('active', wakeWanted);
+  try { localStorage.setItem('novaWakeWord', wakeWanted ? 'on' : 'off'); } catch (_) {}
 }
 
-/* ---------- settings sheet ---------- */
+/* ---------- provider/model settings ---------- */
 
-function renderApps() {
-  const list = $('appsList');
-  list.innerHTML = '';
-  const names = Object.keys(state.apps).sort();
-  if (!names.length) {
-    const row = document.createElement('div');
-    row.className = 'app-row';
-    row.textContent = 'No apps yet';
-    list.appendChild(row);
-    return;
-  }
-  for (const name of names) {
-    const row = document.createElement('div');
-    row.className = 'app-row' + (selectedApp === name ? ' selected' : '');
-    row.textContent = name;
-    row.addEventListener('click', () => {
-      selectedApp = name;
-      $('appName').value = name;
-      $('appPath').value = state.apps[name];
-      renderApps();
-    });
-    list.appendChild(row);
-  }
+function defaultBaseUrl(provider) {
+  if (provider === 'ollama') return 'http://localhost:11434';
+  if (provider === 'lmstudio') return 'http://localhost:1234/v1';
+  return '';
+}
+
+function selectedProvider() {
+  return $('providerSelect').value || state.provider;
+}
+
+function updateProviderFields() {
+  const provider = selectedProvider();
+  const spec = state.providers.find((item) => item.id === provider) || { label: provider };
+  const saved = Boolean(state.keysSaved[provider]);
+  $('keySection').hidden = !KEY_PROVIDERS.has(provider);
+  $('keyLabel').textContent = `${String(spec.label || provider).toUpperCase()} API KEY`;
+  $('setKey').value = '';
+  $('setKey').placeholder = saved ? 'Saved key — leave blank to keep it' : 'Enter API key';
+  $('keyHint').textContent = saved ? 'A key is already saved for this provider.'
+    : provider === 'custom' ? 'Optional for local OpenAI-compatible servers.' : 'Stored in config.py on the server PC.';
+  $('clearKey').hidden = !saved;
+  clearKeyRequested = false;
+
+  const hasUrl = URL_PROVIDERS.has(provider);
+  $('urlSection').hidden = !hasUrl;
+  $('urlLabel').textContent = provider === 'ollama' ? 'OLLAMA SERVER URL' : 'SERVER BASE URL';
+  $('baseUrl').value = state.baseUrls[provider] || defaultBaseUrl(provider);
+  $('baseUrl').placeholder = defaultBaseUrl(provider) || 'https://your-server.example/v1';
+  $('modelField').value = state.models[provider] || DEFAULT_MODELS[provider] || '';
+  $('modelHint').textContent = 'Load models from this provider or enter a model ID directly.';
+  $('modelOptions').replaceChildren();
 }
 
 function openSheet() {
-  $('setKey').value = '';
-  $('setKey').placeholder = state.apiReady ? '•••••••• (saved)' : 'YOUR_GEMINI_API_KEY_HERE';
   $('setName').value = state.name;
-  const radio = document.querySelector(`input[name="speed"][value="${state.speed}"]`);
-  if (radio) radio.checked = true;
-  selectedApp = null;
-  $('appName').value = '';
-  $('appPath').value = '';
-  renderApps();
+  $('providerSelect').value = state.provider;
+  const speedRadio = document.querySelector(`input[name="speed"][value="${state.speed}"]`);
+  if (speedRadio) speedRadio.checked = true;
+  $('settingsStatus').textContent = '';
+  updateProviderFields();
   $('sheetBackdrop').classList.remove('hidden');
+  $('providerSelect').focus();
 }
 
 function closeSheet() {
   $('sheetBackdrop').classList.add('hidden');
 }
 
+async function loadModels() {
+  const provider = selectedProvider();
+  $('loadModels').disabled = true;
+  $('modelHint').textContent = `Loading ${provider} models…`;
+  const payload = { provider };
+  const key = $('setKey').value.trim();
+  if (key) payload.api_key = key;
+  if (URL_PROVIDERS.has(provider)) payload.base_url = $('baseUrl').value.trim();
+  try {
+    const response = await fetch('/api/models', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not load models.');
+    const models = Array.isArray(data.models) ? data.models : [];
+    const options = document.createDocumentFragment();
+    for (const model of models) {
+      const option = document.createElement('option');
+      option.value = model;
+      options.append(option);
+    }
+    $('modelOptions').replaceChildren(options);
+    if (models.length && !models.includes($('modelField').value.trim())) {
+      const preferred = models.find((model) => model.toLowerCase().includes('flash')) || models[0];
+      $('modelField').value = preferred;
+    }
+    $('modelHint').textContent = models.length
+      ? `Loaded ${models.length} model${models.length === 1 ? '' : 's'}.`
+      : 'No chat models were returned.';
+  } catch (error) {
+    $('modelHint').textContent = error.message;
+  } finally {
+    $('loadModels').disabled = false;
+  }
+}
+
 async function saveSettings() {
+  const provider = selectedProvider();
+  const selectedSpeed = document.querySelector('input[name="speed"]:checked');
   const payload = {
     name: $('setName').value.trim() || 'Nova',
-    apps: state.apps,
-    speed: document.querySelector('input[name="speed"]:checked').value,
+    provider,
+    model: $('modelField').value.trim(),
+    speed: selectedSpeed ? selectedSpeed.value : 'normal',
+    clear_key: clearKeyRequested,
   };
   const key = $('setKey').value.trim();
   if (key) payload.api_key = key;
+  if (URL_PROVIDERS.has(provider)) payload.base_url = $('baseUrl').value.trim();
+  $('saveBtn').disabled = true;
+  $('settingsStatus').textContent = 'Saving…';
   try {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const response = await fetch('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
-    state.name = data.name || payload.name;
-    state.apiReady = !!data.api_ready;
-    state.apps = data.apps || state.apps;
-    state.speed = payload.speed;
-    $('titleName').textContent = state.name;
-    document.title = state.name;
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not save settings.');
+    applyState(data);
     closeSheet();
-    addMsg('system', 'Settings saved.');
-  } catch (err) {
-    addMsg('system', 'Cannot reach the server: ' + err.message);
+    setStatus('Saved');
+    setTimeout(() => { if (!busy && !speaking && !listening) setStatus(readyStatus()); }, 900);
+  } catch (error) {
+    $('settingsStatus').textContent = error.message;
+  } finally {
+    $('saveBtn').disabled = false;
   }
 }
 
-async function clearChat() {
-  try {
-    const res = await fetch('/api/clear', { method: 'POST' });
-    const data = await res.json();
-    $('chat').innerHTML = '';
-    addMsg('assistant', data.reply || 'Chat cleared.');
-    closeSheet();
-  } catch (err) {
-    addMsg('system', 'Cannot reach the server: ' + err.message);
-  }
+function applyState(data) {
+  state.name = data.name || state.name;
+  state.provider = data.provider || state.provider;
+  if (typeof data.model === 'string') state.model = data.model;
+  state.models = data.models || state.models;
+  state.providers = data.providers || state.providers;
+  state.keysSaved = data.keys_saved || state.keysSaved;
+  state.baseUrls = data.base_urls || state.baseUrls;
+  state.apiReady = Boolean(data.api_ready);
+  state.speed = data.speed || state.speed;
+  $('titleName').textContent = state.name;
+  document.title = `${state.name} — Voice Chat`;
+  const activeModel = state.model || DEFAULT_MODELS[state.provider] || 'Choose a model';
+  $('modelBtn').textContent = `${data.provider_label || state.provider} · ${activeModel} ▴`;
 }
 
-/* ---------- wiring ---------- */
+function clearSavedKey() {
+  clearKeyRequested = true;
+  $('setKey').value = '';
+  $('keyHint').textContent = 'Saved key will be removed when you save.';
+}
+
+/* ---------- wiring and startup ---------- */
 
 async function loadState() {
+  let savedHistory = [];
   try {
-    const res = await fetch('/api/state');
-    const data = await res.json();
-    state.name = data.name || 'Nova';
-    state.apiReady = !!data.api_ready;
-    state.apps = data.apps || {};
-    state.user_name = data.user_name || '';
-    $('titleName').textContent = state.name;
-    document.title = state.name;
-  } catch (err) { /* keep defaults */ }
-  const hello = state.user_name ? `Hello, ${state.user_name}!` : 'Hello!';
-  addMsg('assistant',
-    `${hello} I'm ${state.name}, your voice assistant. Tap the Mic or type below, ` +
-    `turn on the wake word (moon button) and just say 'Hey ${state.name}', ` +
-    `or say 'search for' to look something up. Say 'help' to hear what I can do.`);
+    const response = await fetch('/api/state');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Could not load settings.');
+    applyState(data);
+    savedHistory = Array.isArray(data.history) ? data.history : [];
+    const options = document.createDocumentFragment();
+    for (const provider of state.providers) {
+      const option = document.createElement('option');
+      option.value = provider.id;
+      option.textContent = provider.label;
+      options.append(option);
+    }
+    $('providerSelect').replaceChildren(options);
+  } catch (error) {
+    addMessage('system', `Settings unavailable: ${error.message}`);
+  }
+  if (savedHistory.length) {
+    for (const message of savedHistory) {
+      if (message && ['user', 'assistant'].includes(message.role)) {
+        addMessage(message.role, message.content || '');
+      }
+    }
+  } else {
+    addMessage('assistant', `Hi, I'm ${state.name}. Ask me anything, or tap Mic to speak.`);
+  }
   setStatus(readyStatus());
+  try { wakeWanted = localStorage.getItem('novaWakeWord') === 'on'; } catch (_) {}
+  updateWakeButton();
+  ensureWake();
 }
 
 $('sendBtn').addEventListener('click', () => {
-  const text = $('entry').value;
-  $('entry').value = '';
+  const input = $('entry');
+  const text = input.value;
+  input.value = '';
+  input.style.height = 'auto';
   send(text);
 });
-$('entry').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    const text = $('entry').value;
-    $('entry').value = '';
-    send(text);
+$('entry').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    $('sendBtn').click();
   }
 });
+$('entry').addEventListener('input', () => {
+  const input = $('entry');
+  input.style.height = 'auto';
+  input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+});
 $('micBtn').addEventListener('click', () => {
-  if (speaking) { stopSpeech(); return; }
-  if (busy) return;
-  startListening();
+  if (speaking) stopSpeech();
+  else if (listening) stopListening();
+  else if (!busy) startListening();
 });
 $('wakeBtn').addEventListener('click', () => {
+  if (!SR) {
+    addMessage('system', 'Wake listening is not supported in this browser. Use Mic or type instead.');
+    return;
+  }
   wakeWanted = !wakeWanted;
   updateWakeButton();
   if (wakeWanted) startWake();
   else { stopWake(); setStatus(readyStatus()); }
 });
 $('gearBtn').addEventListener('click', openSheet);
+$('modelBtn').addEventListener('click', openSheet);
 $('closeSheet').addEventListener('click', closeSheet);
-$('sheetBackdrop').addEventListener('click', (e) => {
-  if (e.target === $('sheetBackdrop')) closeSheet();
+$('cancelBtn').addEventListener('click', closeSheet);
+$('sheetBackdrop').addEventListener('click', (event) => {
+  if (event.target === $('sheetBackdrop')) closeSheet();
 });
-$('saveBtn').addEventListener('click', saveSettings);
-$('clearBtn').addEventListener('click', clearChat);
-$('addApp').addEventListener('click', () => {
-  const name = $('appName').value.trim();
-  const path = $('appPath').value.trim();
-  if (!name || !path) { addMsg('system', 'Enter both an app name and a file path.'); return; }
-  state.apps[name] = path;
-  selectedApp = name;
-  renderApps();
-});
-$('removeApp').addEventListener('click', () => {
-  if (!selectedApp) { addMsg('system', 'Select an app to remove.'); return; }
-  delete state.apps[selectedApp];
-  selectedApp = null;
-  $('appName').value = '';
-  $('appPath').value = '';
-  renderApps();
-});
+$('providerSelect').addEventListener('change', updateProviderFields);
+$('loadModels').addEventListener('click', () => void loadModels());
+$('clearKey').addEventListener('click', clearSavedKey);
+$('saveBtn').addEventListener('click', () => void saveSettings());
+$('clearBtn').addEventListener('click', () => void clearChat());
 
 if (!SR) {
-  $('micBtn').style.opacity = '0.5';
-  $('wakeBtn').style.opacity = '0.5';
+  $('micBtn').disabled = true;
+  $('wakeBtn').disabled = true;
 }
-
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
-}
-window.speechSynthesis && window.speechSynthesis.getVoices();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+if (window.speechSynthesis) speechSynthesis.getVoices();
 
 loadState();

@@ -1,275 +1,156 @@
-# Nova — Voice Assistant
+# Nova — Voice Chat
 
-A voice assistant you can talk to on your **desktop** and on your **phone**. The desktop
-can use Google Gemini (`gemini-3.5-flash-lite`) or a local Ollama model; the mobile
-companion uses Gemini. Say "Hey Nova" and ask anything — Nova can chat and remember
-things about you; the desktop app can search and browse the web, show web images, and open apps.
-
----
+Nova is a chat-only voice assistant for desktop and phone. Type a message or
+speak; replies appear in a conversation and are spoken aloud. Choose one of
+seven chat providers and models from either interface. Nova does **not** launch
+apps, keep long-term memories, or perform web or image searches.
 
 ## How it works
 
-Two front-ends share **one brain** (`config.py` + `memory.json`), so your settings,
-memories and Allowed Apps stay in sync everywhere.
-
-```
-        DESKTOP (main.py)                    MOBILE (mobile_server.py + web/)
- ┌────────────────────────────┐       ┌─────────────────────────────────┐
- │ tkinter window + tray icon │       │ phone browser (installable PWA) │
- │ own always-on mic stream   │       │ browser mic + "Hey Nova" wake   │
- │ gTTS / pyttsx3 speech      │       │ phone speech-synthesis voice    │
- └────────────┬───────────────┘       └──────────────┬──────────────────┘
-              │            SHARED BRAIN              │
-              └────────► config.py + memory.json ◄────┘
-                                │
-                    ┌───────────▼────────────┐
-                    │  Command router        │
-                    │  1. memory commands    │
-                    │  2. local commands     │
-                    │  3. open [app]         │
-                    │  4. desktop web/image  │
-                    │  5. Gemini / Ollama    │
-                    └────────────────────────┘
+```text
+Desktop (main.py)                      Phone (mobile_server.py + web/)
+┌────────────────────────────┐         ┌──────────────────────────────┐
+│ Tk chat, shared mic stream │         │ Installable browser chat    │
+│ Google STT · gTTS / pyttsx3│         │ Browser STT · phone speech   │
+└─────────────┬──────────────┘         └──────────────┬───────────────┘
+              │                                        │
+              └────────── shared config.py ───────────┘
+                                 │
+                  Anthropic · Gemini · OpenAI
+                 OpenRouter · Ollama · LM Studio
+                  Custom OpenAI-compatible API
 ```
 
-### The voice pipeline (both apps)
+Both clients call the shared adapters in `chat_providers.py`. Provider, model,
+assistant name, avatar, voice speed, API keys, and local server addresses are
+stored in `config.py`. Chat history is held for the current conversation and
+cleared with **New chat**; no long-term memory file is used.
 
-1. **Wake word** — a lightweight listener watches for the assistant's name
-   ("Nova", "Hey Nova", "Nova, I have a question"). On the desktop there is only
-   ever **one open mic stream** (`sd.InputStream`): `_mic_thread` keeps it
-   running and pushes every chunk into `_mic_queue`; `_audio_router_thread`
-   routes chunks by `_listening_mode` — a rolling 3-second `_wake_buffer` deque
-   (idle) or the `_question_chunks` list (while recording) — so Windows audio
-   drivers never see two streams.
-   On the phone the browser's speech recognition does the same job.
-2. **Activation** — a confirmation beep plays and the app switches to
-   `Listening...` (the mic button listens for your question).
-3. **Understanding** — your speech is transcribed (Google speech recognition on
-   desktop; the browser on mobile) and routed:
-   - **Memory commands** — "my name is …", "remember that …", "forget …",
-     "what do you remember" — handled locally and stored in `memory.json`.
-   - **Local commands** — "stop", "clear chat", "what time is it", the date,
-     "help", "repeat that", "goodbye" — answered instantly, no internet needed.
-   - **"open [app]"** — launches the program on the PC if it's on the
-     Allowed Apps list (anything else answers *"That app isn't on my allowed list."*).
-   - **Desktop: "search for …" / "browse for …"** — DuckDuckGo results are fetched for the selected AI, with a clickable link to open the browser results.
-   - **Desktop: "show me pictures of …"** — Wikimedia Commons thumbnails are shown inline with clickable source pages; "browse to https://…" opens a web page in your browser.
-   - **Anything else** — sent to the selected AI. Desktop supports Gemini or Local AI
-     (Ollama); mobile uses Gemini. Things remembered about you are added to the prompt.
-4. **Reply** — the answer appears in the chat and is **spoken out loud**
-   (desktop: gTTS behind a hard 3-second `threading.Timer` cap, with an
-   immediate offline **pyttsx3** fallback — engine created once at startup,
-   `runAndWait()` always runs in its own thread; mobile: the phone's built-in
-   voice). The animated portrait reacts to every state: idle, listening,
-   thinking, talking, happy, and sad.
+### Chat providers
 
-### The desktop app (`main.py`)
+The picker supports **Anthropic**, **Google Gemini**, **OpenAI**, **OpenRouter**,
+**Ollama**, **LM Studio**, and **Custom OpenAI-compatible** servers. Models can
+be loaded from the provider or entered by ID. The default remains Google Gemini
+with `gemini-3.5-flash-lite`.
 
-- tkinter window (900×620, dark monochrome) with header, full-width chat and input row.
-- Header: avatar + name on the left; **status dot** (gray = idle, white = listening,
-  blinking = speaking) and a **⚙ gear** button that opens the settings popup
-  (AI provider, Gemini API key or Ollama model, name, voice speed, Allowed Apps).
-- Mic button turns **red (#FF4444)** while Nova speaks — tap it to stop mid-sentence.
-- Typing dots while the selected AI thinks, `[Copy]` links on every message, Clear chat.
-- Web browsing: search/browse requests include a clickable browser link; explicit web addresses open in the default browser.
-- Ask **"show me pictures of …"** to display Wikimedia Commons thumbnails in chat with source links.
-- Closing the window **minimizes to the system tray** — click the icon to reopen.
-- Voice speed: slow / normal / fast (gTTS slow mode, or faster playback).
+- Add cloud API keys in the model picker. Keys are stored as plain text in
+  `config.py` on the PC; do not share or commit real keys.
+- Ollama defaults to `http://localhost:11434` and `phi3:mini`.
+- LM Studio defaults to `http://localhost:1234/v1`.
+- For a custom server, enter its OpenAI-compatible `/v1` base URL and model ID;
+  an API key is optional for keyless local servers.
+- The phone server sends requests from the PC, so `localhost` refers to that PC,
+  not the phone. Keep local model servers reachable from the machine running
+  Nova.
 
-### The mobile web app (`mobile_server.py` + `web/`)
+### Desktop voice and conversation
 
-- A small standard-library web server on your PC + an installable **PWA** for phones.
-- Tap the Mic (or type), or turn on the **☾ wake word** for hands-free "Hey Nova".
-- Replies are spoken by the **phone's own speech synthesis**.
-- Settings (gear) save straight into the same `config.py`; "open [app]" launches
-  programs **on the PC** where the server runs.
-- Works over your local Wi-Fi — nothing is exposed to the internet.
+The desktop keeps one microphone stream open. `_mic_thread` owns the sole
+`sounddevice.InputStream` and puts audio chunks on `_mic_queue`. The
+`_audio_router_thread` routes them to the rolling 2-second `_wake_buffer` or to
+`_question_chunks`, based on `_listening_mode` (`"wake"` or `"question"`). Wake
+checks run every 0.5 seconds and only transcribe when RMS is at least `0.008`.
+Saying **“Hey Nova”** switches to question mode, plays a short tone, and captures
+the follow-up; the Mic button starts question mode directly. Capture stops after
+0.8 seconds of silence. If the microphone or speech recognition is unavailable,
+type in the composer instead. PyAudio is not used.
 
-### Animated desktop portrait
+Every assistant reply is spoken. gTTS is capped by a 3-second
+`threading.Timer`; a failure or timeout immediately falls back to the pyttsx3
+engine initialized once at startup. Blocking `runAndWait()` runs in its own
+thread, and temporary MP3 files are deleted after playback. The red
+**#FF4444** Stop button interrupts speech. Voice speed is configurable.
 
-The desktop portrait is a mouthless Pillow-drawn redraw of the supplied
-`avatar.png` design, not a still display. Brows, capsule eyes, blinks, gaze, and
-blush show emotion; the head and shoulders have a gentle breathing motion. There
-is no mouth in any state; listening and speaking use an animated sound wave,
-while thinking shows animated dots.
-Choose **Animated portrait**, **Classic Grok Bot**, or **Static image** in the
-Settings modal; the selection is saved to `config.py` and applied to the header.
+The desktop uses a dark, centered chat layout with Markdown replies, copy
+controls, a provider/model picker, New chat, Settings, and the system tray.
+Exact active statuses are **Listening...**, **Thinking...**, and **Speaking...**.
 
-### Mobile and classic Grok Bot
+### Phone chat
 
-The mobile PWA keeps its existing animated Grok Bot SVG. The classic desktop
-`BubblyFace` remains selectable from the avatar options in Settings.
+`mobile_server.py` serves the PWA in `web/` and uses the same provider settings
+and chat adapters as desktop. On the phone, speech recognition and spoken
+responses use browser-provided speech APIs; typed input remains available if
+voice recognition is unsupported or microphone permission is denied. The wake
+word can be toggled on or off in the header. The phone UI also has provider/model
+settings and New chat.
 
----
+Run the server on the PC and open its LAN address on a phone connected to the
+same Wi-Fi. Requests go from the server to the selected provider; the phone
+never calls `localhost` to reach a model server.
+
+## Avatars
+
+The desktop Settings selector remains **Animated portrait**, **Classic Grok
+Bot**, and **Static image**. The mouthless animated portrait is the default; it
+uses gentle body/head movement and eye, brow, gaze, and blush expressions. The
+classic `BubblyFace` option and static-image option remain available, and the
+selection persists in `config.py` as `AVATAR_MODE`. `USE_IMAGE_AVATAR` remains as
+a legacy rollback switch. The phone keeps its existing animated SVG avatar.
 
 ## Quick start
 
-### Desktop (Windows, Python 3.13/3.14)
+### Desktop
 
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
-1. Click the **⚙ gear** and choose **Gemini API** (paste a key from
-   <https://aistudio.google.com/apikey>) or **Local AI (Ollama)**.
-2. For Local AI, install and start Ollama, then download a model such as
-   `ollama pull phi3:mini`; Settings defaults to `phi3:mini`. Ollama must be running
-   at `http://localhost:11434`. If it is unavailable, Nova falls back to Gemini
-   (which requires a saved API key) and displays a chat notice.
-3. Click **Mic** (or type) and talk. Say **"Hey Nova"** any time to go hands-free.
+Open **Settings → Provider & model**, choose a provider, add its API key or local
+server URL if needed, choose a model, then save. Click Mic or type a message;
+say “Hey Nova” for hands-free desktop listening.
 
-### On your phone
+### Phone
+
+Start the server on the PC:
 
 ```bash
 python mobile_server.py
 ```
 
-The console prints your PC's address — open `http://<your-pc-ip>:8080` in your
-phone's browser (same Wi-Fi). Use **"Add to Home Screen"** to install Nova like an
-app. Voice input works best in Chrome/Android; on iOS Safari it is more limited —
-typing always works.
+Open the printed `http://<PC-LAN-address>:8080` URL on a phone on the same
+network. Use the browser's **Add to Home Screen** action to install the PWA.
+Browser voice input and PWA installation vary by platform; typing is always
+available. The server is intended for a trusted local network, not direct public
+internet exposure.
 
-> No Ollama connection is used by the mobile companion; it continues to use Gemini.
-> The mobile server uses only the standard library plus `google-genai` and `requests`.
-
----
-
-## Features
-
-- **Chat** with conversation history, typing dots, and `[Copy]` on every message.
-- **Voice in** — mic button, text fallback, and the "Hey Nova" wake word (always-on).
-- **Voice out** — every reply is spoken; stop it any time with the red mic button.
-- **Memory** — names and facts persist in `memory.json` between sessions.
-- **Web search** — "search for …" answers with DuckDuckGo context and sources.
-- **App launcher** — "open [app]" runs programs from your Allowed Apps list.
-- **Settings** — choose an avatar (**Animated portrait**, **Classic Grok Bot**, or
-  **Static image**) and an AI provider (**Gemini API** or **Local AI (Ollama)**).
-  Gemini uses an API key; Ollama uses a configurable model (default `phi3:mini`).
-  Ollama failures fall back to Gemini with a chat notice. These settings, the
-  assistant name, voice speed and Allowed Apps are saved to `config.py`.
-- **Tray icon** — closing the desktop window keeps Nova running in the background.
-- **Mobile PWA** — same assistant in your pocket over local Wi-Fi.
-
-## Voice commands
-
-| Say | What happens |
-| --- | --- |
-| "Hey Nova" / "Nova" (+ your question) | Wake (and ask in one breath) |
-| "stop" / "be quiet" | Silence speech |
-| "clear chat" | Reset the conversation |
-| "what time is it" / "what's the date" | Instant answer |
-| "search for …" | Web search answer |
-| "open [app name]" | Launch an allowed app on the PC |
-| "my name is Ali" / "call me Ali" | Remember your name |
-| "remember that …" / "forget that …" | Store / delete a fact |
-| "what's my name" / "what do you remember" | Recall memories |
-| "help" | List everything Nova can do |
-| "repeat that" | Say the last answer again |
-| "goodbye" | Quit (desktop) |
-
----
-
-## Files
+## Project files
 
 | File | Purpose |
 | --- | --- |
-| `main.py` | Desktop app (tkinter, mic, TTS, wake listener, tray) |
-| `mobile_server.py` | Mobile web server + shared assistant brain |
-| `web/` | Phone web app (PWA: HTML/JS/CSS, manifest, service worker) |
-| `config.py` | `GEMINI_API_KEY`, `AI_PROVIDER`, `OLLAMA_MODEL`, `AVATAR_MODE`, `ASSISTANT_NAME`, `ALLOWED_APPS` |
-| `avatar.png` | User-provided portrait reference and optional static desktop avatar |
-| `memory.json` | Long-term memory (auto-created, gitignored) |
+| `main.py` | Desktop chat, avatar selector, shared microphone router, TTS, and tray |
+| `mobile_server.py` | Local web server and phone-chat API |
+| `chat_providers.py` | Shared adapters, model listing, and config persistence |
+| `config.py` | Provider/model, key, voice, name, and avatar settings |
+| `web/` | Phone PWA (HTML, CSS, JavaScript, manifest, service worker) |
 | `requirements.txt` | Python dependencies |
-| `preview/` | Browser mockups used while designing the UI |
+| `avatar.png` | Supplied static avatar for the Static image choice; replace with your own art if desired |
 
----
+`ALLOWED_APPS` remains in `config.py` for old config-file compatibility but is
+not read by the chat-only app. No Coucou names, character art, sounds, or other
+branding assets are used.
 
-## Updates (key points)
+## Upstream attribution
 
-> Every change to this project is recorded here as key points, newest first.
+The provider-first chat-picker interaction is inspired by
+[Louis-CFM/coucou](https://github.com/Louis-CFM/coucou). Coucou is MIT-licensed;
+the required copyright and license notice is included in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Nova's provider adapters,
+voice pipeline, avatars, and interface are implemented for this project.
 
-**2026-10-10 — Desktop web browsing and image search**
-- `search for …` and `browse for …` still provide DuckDuckGo context and now add a clickable link to open full browser results; `browse to https://…` opens an explicit page.
-- `show me pictures of …` searches Wikimedia Commons, displays up to four inline thumbnails with source-page links, and offers a DuckDuckGo image-results link as a fallback.
+## Updates
 
-**2026-10-10 — Browser preview synced with avatar selector**
-- `preview/index.html` now uses the same drawn, mouthless animated portrait and includes the three persisted Settings modes; its choice is saved locally in the browser.
-- `preview/avatars.html` compares Animated portrait, Classic Grok Bot, and Static image across the same emotion states, using a shared renderer in `preview/avatar-preview.js`.
+> Dated newest-first summary of the current chat-only work.
 
-**2026-10-10 — Mouthless animated portrait redraw**
-- Redrew the reference as Pillow-rendered shapes rather than displaying the supplied image; the portrait breathes through subtle head/shoulder movement and expresses itself through eyes, brows, gaze, and blush.
-- No mouth is drawn in any state, including while speaking. Listening/speaking retain the animated wave indicator; thinking retains its dots.
-
-**2026-10-10 — Avatar selector in Settings**
-- Added three Settings choices: **Animated portrait**, **Classic Grok Bot**, and **Static image**. The animated portrait is the default; static artwork or Pillow rendering failures fall back to the classic animated face.
-- Changing the selection and pressing **Save settings** immediately swaps the header avatar; the chosen mode persists in `config.py` as `AVATAR_MODE` across restarts.
-- The uploaded `avatar.jpg`/`avatar.png` is unchanged; the mobile PWA keeps its existing animated Grok Bot SVG.
-
-
-**2026-10-10 — Desktop Local AI option (Ollama) with Gemini fallback**
-- Added a provider radio to Settings: **Gemini API** or **Local AI (Ollama)**. The selected provider shows only its relevant field — the Gemini key or the Ollama model name.
-- Ollama uses the Python `ollama` library at `http://localhost:11434`; the configurable model defaults to `phi3:mini`. Provider/model persist in `config.py`; existing config files default safely to Gemini.
-- Local conversations use the same assistant prompt and remembered facts. Search results remain context for the selected model; chat history is retained per provider and reset by Clear chat.
-- If the Ollama package/server/model errors, Nova posts a Notice in chat and automatically tries Gemini. If Gemini is not configured or also fails, Nova explains that in the chat rather than crashing.
-- Added `ollama` to `requirements.txt`. This option is desktop-only; the mobile companion remains on Gemini, and its config save preserves the desktop provider/model settings.
-
-**2026-10-10 — Mic pipeline v2: `_mic_queue` + `_audio_router_thread` (exact spec)**
-- `_mic_thread` opens exactly one `sd.InputStream` and runs permanently, pushing raw chunks into `_mic_queue`.
-- `_audio_router_thread` reads `_mic_queue` and routes chunks by the `_listening_mode` string (starts at `"wake"`): into the rolling `_wake_buffer` (deque, 3 s) in wake mode, or `_question_chunks` (list) in question mode.
-- Wake checker runs every 2 seconds: it transcribes the wake buffer and `re.search`es for the assistant name; on a hit it switches `_listening_mode` to `"question"`, plays the beep, and collects the question (0.8 s silence cutoff).
-- The Mic button switches `_listening_mode` to `"question"` directly; after capture the mode returns to `"wake"` so the wake listener never stops.
-- Removed the leftover multi-stream-era helpers (`_open_input_stream`, `record_question`, the old wake worker) — search, memory, app launcher, UI and tray are unchanged.
-
-**2026-10-10 — Static image avatar with emotion overlays**
-- The header avatar is now a **static `avatar.png`** (loaded from the app folder via `PhotoImage`/PIL `ImageTk`) shown at 64×64 — swap in your own image any time.
-- Animated emoji-style overlay at the avatar's bottom-right: hidden when idle, an animated **sound wave** when listening, animated **"..." dots** when thinking, and pulsing **dots** when speaking.
-- The animated drawn face (BubblyFace) is kept in `main.py` as the classic fallback; the current avatar-mode switches are documented in the newest key point.
-
-**2026-10-10 — UI polish (desktop)**
-- Animated face in the header slimmed down (72 → 48) to give the chat more room.
-- User messages now sit in a **#141414 bubble** with 6px padding (visually distinct from assistant replies).
-- Assistant messages show the assistant name in **#8C8C8C** directly before the message text ("Nova: …").
-- Status line is always visible — it now shows **"Say Nova to start"** when idle instead of going blank.
-- The gear button is labeled **"⚙ Settings"** so it's obvious.
-- Thin **#242424 separator line** added between the header and the chat window.
-
-**2026-10-10 — Speech robustness (gTTS never hangs)**
-- Every gTTS call now runs in a worker thread behind a hard **3-second `threading.Timer`** cap — a hanging or failing internet request can no longer stall the app.
-- On failure or timeout the reply is spoken **immediately** with the offline **pyttsx3** engine.
-- The pyttsx3 fallback engine is **initialized once at startup** (with its base speaking rate captured so speed changes never compound), and `runAndWait()` always executes in its own thread since it blocks.
-- Fallback speech is still cuttable mid-sentence (the red Mic/Stop calls `engine.stop()`), and temp mp3 files are cleaned on every path (failure, timeout, cancel).
-
-**2026-10-10 — Wake word rework (single shared mic stream)**
-- Rewrote the desktop wake system around **one shared `sd.InputStream`** that runs in a background thread for the whole session — Windows drivers often reject two streams at once, so only one is ever open.
-- The stream feeds two queues: a rolling **3-second wake buffer** and a **question queue**; one `threading.Event` (`_wake_mode`) switches between them.
-- Idle: the wake buffer is transcribed every 2 seconds and checked for the assistant's name. Mic button or wake hit: the same stream feeds the question queue for the full question (0.8 s silence cutoff).
-- The stream self-heals: if it ever stops, it is automatically reopened. Removed the old second-stream wake path (`_wake_listen_once`) and the stream-opening `record_question()`.
-
-**2026-10-10 — Mobile release**
-- Added `mobile_server.py` + `web/` — a phone-first installable PWA (manifest + service worker).
-- Voice in the browser: tap-to-talk Mic and an always-on **"Hey Nova"** wake mode.
-- Replies spoken by the phone's built-in speech synthesis (speed: slow/normal/fast).
-- Same brain everywhere: settings, memory and Allowed Apps are shared with the desktop app via `config.py` + `memory.json`.
-- "open [app]" from the phone launches the program on the PC; settings save to `config.py` from the phone's gear menu.
-- Fixed memory recall for spoken "whats my name" (no apostrophe) in both apps.
-
-**2026-10-10 — Desktop overhaul**
-- Avatar is now a **1:1 Grok Bot model**: twin capsule eyes + blush, no shine line, mouth or brows; emotions morph the capsules (grow, drift, lean, droop, chatter, blink) on the calm breathing pearl head.
-- Wake listener rewritten onto its **own always-on `sd.InputStream`** — no more lock contention with the main mic; restarts itself after every activation and never dies.
-- Complete UI redesign: 900×620 full-width layout, settings **popup** behind a ⚙ gear, header **status dot** (gray/white/blinking), user messages right-aligned white, assistant left-aligned gray.
-- **No separate Stop button** — the Mic button turns red (#FF4444) while speaking; click to stop mid-sentence.
-- Speech fallback: gTTS with a **3-second timeout** falls back to offline **pyttsx3** (`requirements.txt` updated).
-- Fixed `TclError: unknown option "-rmargin1"` on Python 3.14 Tk.
-
-**2026-10-09 — Avatar design pass**
-- Live avatar picker (`preview/avatars.html`) comparing calm pearl head / kawaii eyes + calm motion / kawaii bubbly ball.
-- Calm pearl-bubble-head avatar applied: still while idle, motion only when the emotion calls for it.
-
-**Earlier — core features**
-- Long-term memory: name + facts in `memory.json`, voice commands to remember/forget/ask, memories injected into Gemini's system prompt, personal greetings.
-- Wake word + activation beep, always-on listener that survives errors.
-- Monochrome design system (pure black, sharp corners, white highlights).
-- Gemini chat (`gemini-3.5-flash-lite`, `google-genai`), typing indicator dots, `[Copy]` links, Clear chat.
-- Voice speed slider, Stop control, DuckDuckGo "search for …", Allowed Apps launcher.
-- System-tray minimize (pystray), settings persisted to `config.py`.
+**2026-10-10 — Chat-only desktop and phone revamp**
+- Replaced the desktop's active command router with ordinary provider-backed
+  chat; removed memory commands, app launching, and web/image search from the
+  active experience.
+- Added the same provider/model settings to desktop and phone: Anthropic,
+  Google Gemini, OpenAI, OpenRouter, Ollama, LM Studio, and custom
+  OpenAI-compatible endpoints.
+- Refreshed the phone PWA as a responsive chat surface with Markdown replies,
+  provider settings, voice input/output, and New chat.
+- Preserved the one-stream desktop microphone design, typed fallback, TTS
+  timeout/fallback rules, status text, stop-button color, and all three avatar
+  choices. Added Coucou MIT attribution without copying product assets.

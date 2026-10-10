@@ -1,7 +1,7 @@
 'use strict';
 
 /* Simple cache-first shell, network-first API. */
-const CACHE = 'nova-v1';
+const CACHE = 'nova-chat-v2';
 const SHELL = ['/', '/index.html', '/style.css', '/app.js',
                '/manifest.webmanifest', '/icon.svg'];
 
