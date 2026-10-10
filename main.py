@@ -183,23 +183,63 @@ def _play_mp3(path: str, rate: float, cancel: threading.Event | None) -> None:
     playsound(path)  # fallback: cannot change speed or stop mid-sentence
 
 
-def _speak_offline(text: str, speed: str,
-                  cancel: threading.Event | None) -> None:
-    """Fallback speech with pyttsx3 when gTTS cannot reach the network."""
-    if pyttsx3 is None or not text or (cancel is not None and cancel.is_set()):
+_OFFLINE_ENGINE = None  # pyttsx3 fallback engine, created once at startup
+_OFFLINE_BASE_RATE = 200  # engine's default speaking rate
+_OFFLINE_LOCK = threading.Lock()
+
+
+def init_offline_speech() -> None:
+    """Create the pyttsx3 fallback engine once at startup."""
+    global _OFFLINE_ENGINE, _OFFLINE_BASE_RATE
+    if pyttsx3 is None or _OFFLINE_ENGINE is not None:
         return
     try:
-        engine = pyttsx3.init()  # a fresh engine per utterance (avoids stalls)
-        rate = engine.getProperty("rate")
-        if speed == "fast":
-            engine.setProperty("rate", rate * FAST_RATE)
-        elif speed == "slow":
-            engine.setProperty("rate", rate * 0.75)
-        engine.say(text)
-        engine.runAndWait()
-        engine.stop()
-    except Exception:  # noqa: BLE001 - speech output is optional
-        pass
+        _OFFLINE_ENGINE = pyttsx3.init()
+        _OFFLINE_BASE_RATE = _OFFLINE_ENGINE.getProperty("rate")
+    except Exception:  # noqa: BLE001 - offline speech stays optional
+        _OFFLINE_ENGINE = None
+
+
+def _speak_offline(text: str, speed: str,
+                  cancel: threading.Event | None) -> None:
+    """Fallback speech with the startup pyttsx3 engine.
+
+    runAndWait() blocks, so it is called in its own thread; this call waits
+    for the utterance to finish (or for cancel, which stops the engine
+    mid-sentence) so "Speaking..." stays accurate.
+    """
+    if not text or (cancel is not None and cancel.is_set()):
+        return
+    if _OFFLINE_ENGINE is None:
+        init_offline_speech()  # safety net if startup init was skipped
+    engine = _OFFLINE_ENGINE
+    if engine is None:
+        return
+
+    def _run() -> None:
+        with _OFFLINE_LOCK:
+            try:
+                if speed == "fast":
+                    engine.setProperty("rate", _OFFLINE_BASE_RATE * FAST_RATE)
+                elif speed == "slow":
+                    engine.setProperty("rate", _OFFLINE_BASE_RATE * 0.75)
+                else:
+                    engine.setProperty("rate", _OFFLINE_BASE_RATE)
+                engine.say(text)
+                engine.runAndWait()  # blocks - always called in this thread
+            except Exception:  # noqa: BLE001 - speech output is optional
+                pass
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    while worker.is_alive():
+        if cancel is not None and cancel.is_set():
+            try:
+                engine.stop()  # cut the speech mid-sentence
+            except Exception:  # noqa: BLE001 - engine may be busy
+                pass
+            break
+        worker.join(0.1)
 
 
 def speak(text: str, speed: str = "normal",
@@ -207,28 +247,78 @@ def speak(text: str, speed: str = "normal",
     """Speak text out loud: gTTS -> temp mp3 -> playback -> delete the temp file.
 
     "slow" uses gTTS slow mode; "fast" plays the audio at a faster rate.
-    gTTS needs internet — if it fails or times out after 3 seconds the text
-    is spoken locally with pyttsx3 instead.
+    gTTS needs an internet request that can hang, so every gTTS call runs in
+    a worker thread capped by a 3-second threading.Timer. On failure or
+    timeout the text is spoken immediately with the local pyttsx3 engine.
     """
     if not text or (cancel is not None and cancel.is_set()):
         return
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp_file:
-        mp3_path = tmp_file.name
-    try:
+
+    result: dict = {}
+    done = threading.Event()
+    deliver_lock = threading.Lock()
+
+    def _fetch() -> None:
+        """Run every gTTS call (build + save) behind the 3-second cap."""
+        mp3_path = None
+        delivered = False
         try:
-            tts = gTTS(text, slow=(speed == "slow"), timeout=3)
-        except TypeError:  # older gTTS without a timeout parameter
-            tts = gTTS(text, slow=(speed == "slow"))
-        tts.save(mp3_path)
-        rate = FAST_RATE if speed == "fast" else 1.0
-        _play_mp3(mp3_path, rate, cancel)
-    except Exception:  # noqa: BLE001 - gTTS failed or timed out
+            with tempfile.NamedTemporaryFile(suffix=".mp3",
+                                             delete=False) as tmp_file:
+                mp3_path = tmp_file.name
+            try:
+                tts = gTTS(text, slow=(speed == "slow"), timeout=3)
+            except TypeError:  # older gTTS without a timeout parameter
+                tts = gTTS(text, slow=(speed == "slow"))
+            tts.save(mp3_path)
+            with deliver_lock:
+                if not done.is_set():
+                    result["mp3"] = mp3_path
+                    delivered = True
+        except Exception as error:  # noqa: BLE001 - handled by the fallback
+            result["error"] = error
+        finally:
+            if not delivered and mp3_path:
+                try:
+                    os.remove(mp3_path)  # failed or late fetch: drop the file
+                except OSError:
+                    pass
+            done.set()
+
+    worker = threading.Thread(target=_fetch, daemon=True)
+    worker.start()
+    timer = threading.Timer(3.0, done.set)  # hard 3-second cap on gTTS
+    timer.start()
+    while not done.is_set():
+        if cancel is not None and cancel.is_set():
+            break
+        done.wait(0.1)
+    timer.cancel()
+
+    if cancel is not None and cancel.is_set():
+        with deliver_lock:
+            done.set()  # abandon the fetch; _fetch cleans up undelivered files
+            mp3_path = result.pop("mp3", None)
+        if mp3_path:
+            try:
+                os.remove(mp3_path)
+            except OSError:
+                pass
+        return
+
+    mp3_path = result.get("mp3")
+    if mp3_path:
+        try:
+            rate = FAST_RATE if speed == "fast" else 1.0
+            _play_mp3(mp3_path, rate, cancel)
+        finally:
+            try:
+                os.remove(mp3_path)  # delete the temp file after playing
+            except OSError:
+                pass
+    else:
+        # gTTS failed or timed out -> speak locally right away
         _speak_offline(text, speed, cancel)
-    finally:
-        try:
-            os.remove(mp3_path)  # delete the temp file after playing
-        except OSError:
-            pass
 
 
 def play_tone(frequency: int = 880, duration: float = 0.12,
@@ -674,6 +764,7 @@ class VoiceAssistantApp:
 
         self._build_ui()
         self._configure_gemini()
+        init_offline_speech()  # pyttsx3 fallback engine, created once
         self._greet()
         self._setup_tray()
         threading.Thread(target=self._mic_stream_worker, daemon=True).start()

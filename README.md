@@ -54,9 +54,11 @@ memories and Allowed Apps stay in sync everywhere.
    - **Anything else** — sent to Gemini. Things remembered about you are injected
      into the system prompt, so Nova uses them naturally.
 4. **Reply** — the answer appears in the chat and is **spoken out loud**
-   (desktop: gTTS with a 3-second timeout and an offline **pyttsx3** fallback;
-   mobile: the phone's built-in voice). The animated Grok Bot face reacts to every
-   state: idle, listening, thinking, talking, happy, sad.
+   (desktop: gTTS behind a hard 3-second `threading.Timer` cap, with an
+   immediate offline **pyttsx3** fallback — engine created once at startup,
+   `runAndWait()` always runs in its own thread; mobile: the phone's built-in
+   voice). The animated Grok Bot face reacts to every state: idle, listening,
+   thinking, talking, happy, sad.
 
 ### The desktop app (`main.py`)
 
@@ -166,6 +168,12 @@ typing always works.
 ## Updates (key points)
 
 > Every change to this project is recorded here as key points, newest first.
+
+**2026-10-10 — Speech robustness (gTTS never hangs)**
+- Every gTTS call now runs in a worker thread behind a hard **3-second `threading.Timer`** cap — a hanging or failing internet request can no longer stall the app.
+- On failure or timeout the reply is spoken **immediately** with the offline **pyttsx3** engine.
+- The pyttsx3 fallback engine is **initialized once at startup** (with its base speaking rate captured so speed changes never compound), and `runAndWait()` always executes in its own thread since it blocks.
+- Fallback speech is still cuttable mid-sentence (the red Mic/Stop calls `engine.stop()`), and temp mp3 files are cleaned on every path (failure, timeout, cancel).
 
 **2026-10-10 — Wake word rework (single shared mic stream)**
 - Rewrote the desktop wake system around **one shared `sd.InputStream`** that runs in a background thread for the whole session — Windows drivers often reject two streams at once, so only one is ever open.
