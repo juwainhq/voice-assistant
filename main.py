@@ -117,6 +117,7 @@ FONT_SECTION = ("Segoe UI", 12, "bold")
 
 
 _RECOGNIZER = sr.Recognizer()
+_LAST_TRANSCRIPTION_ERROR = ""
 
 
 def transcribe(audio: sr.AudioData) -> str | None:
@@ -125,12 +126,15 @@ def transcribe(audio: sr.AudioData) -> str | None:
     Any failure (including missing audioop on new Python versions) is
     swallowed so the listening threads never die silently.
     """
+    global _LAST_TRANSCRIPTION_ERROR
+    _LAST_TRANSCRIPTION_ERROR = ""
     try:
-        return _RECOGNIZER.recognize_google(audio)
+        return _RECOGNIZER.recognize_google(audio) or None
     except sr.UnknownValueError:
         return None
     except Exception as error:  # noqa: BLE001 - keep the listener alive
-        print(f"[transcribe] speech recognition failed: {error}")
+        _LAST_TRANSCRIPTION_ERROR = " ".join(str(error).split()) or type(error).__name__
+        print(f"[transcribe] speech recognition failed: {_LAST_TRANSCRIPTION_ERROR}")
         return None
 
 
@@ -181,7 +185,7 @@ def init_offline_speech() -> None:
 
 
 def _speak_offline(text: str, speed: str,
-                  cancel: threading.Event | None) -> None:
+                  cancel: threading.Event | None) -> bool:
     """Fallback speech with the startup pyttsx3 engine.
 
     runAndWait() blocks, so it is called in its own thread; this call waits
@@ -189,26 +193,28 @@ def _speak_offline(text: str, speed: str,
     mid-sentence) so "Speaking..." stays accurate.
     """
     if not text or (cancel is not None and cancel.is_set()):
-        return
+        return True
     if _OFFLINE_ENGINE is None:
         init_offline_speech()  # safety net if startup init was skipped
     engine = _OFFLINE_ENGINE
     if engine is None:
-        return
+        return False
+
+    outcome = {"error": None}
 
     def _run() -> None:
         with _OFFLINE_LOCK:
             try:
                 if speed == "fast":
-                    engine.setProperty("rate", _OFFLINE_BASE_RATE * FAST_RATE)
+                    engine.setProperty("rate", int(_OFFLINE_BASE_RATE * FAST_RATE))
                 elif speed == "slow":
-                    engine.setProperty("rate", _OFFLINE_BASE_RATE * 0.75)
+                    engine.setProperty("rate", int(_OFFLINE_BASE_RATE * 0.75))
                 else:
                     engine.setProperty("rate", _OFFLINE_BASE_RATE)
                 engine.say(text)
                 engine.runAndWait()  # blocks - always called in this thread
-            except Exception:  # noqa: BLE001 - speech output is optional
-                pass
+            except Exception as error:  # noqa: BLE001 - report unavailable output
+                outcome["error"] = error
 
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
@@ -220,10 +226,13 @@ def _speak_offline(text: str, speed: str,
                 pass
             break
         worker.join(0.1)
+    if cancel is not None and cancel.is_set():
+        return True
+    return outcome["error"] is None
 
 
 def speak(text: str, speed: str = "normal",
-          cancel: threading.Event | None = None) -> None:
+          cancel: threading.Event | None = None) -> bool:
     """Speak text out loud: gTTS -> temp mp3 -> playback -> delete the temp file.
 
     "slow" uses gTTS slow mode; "fast" plays the audio at a faster rate.
@@ -232,7 +241,7 @@ def speak(text: str, speed: str = "normal",
     timeout the text is spoken immediately with the local pyttsx3 engine.
     """
     if not text or (cancel is not None and cancel.is_set()):
-        return
+        return True
 
     result: dict = {}
     done = threading.Event()
@@ -284,7 +293,7 @@ def speak(text: str, speed: str = "normal",
                 os.remove(mp3_path)
             except OSError:
                 pass
-        return
+        return True
 
     mp3_path = result.get("mp3")
     if mp3_path:
@@ -296,9 +305,9 @@ def speak(text: str, speed: str = "normal",
                 os.remove(mp3_path)  # delete the temp file after playing
             except OSError:
                 pass
-    else:
-        # gTTS failed or timed out -> speak locally right away
-        _speak_offline(text, speed, cancel)
+        return True
+    # gTTS failed or timed out -> speak locally right away
+    return _speak_offline(text, speed, cancel)
 
 
 def play_tone(frequency: int = 880, duration: float = 0.12,
@@ -943,6 +952,9 @@ class VoiceAssistantApp:
         self._mic_rate = SAMPLE_RATE
         self._wake_last_check = 0.0
         self._wake_unclear = 0
+        self._mic_ready = threading.Event()
+        self._mic_error = ""
+        self._mic_error_reported = ""
         self._running = True
         self._msg_counter = 0
         self._copy_texts: dict[str, str] = {}
@@ -966,10 +978,9 @@ class VoiceAssistantApp:
         init_offline_speech()  # pyttsx3 fallback engine, created once
         self._greet()
         self._setup_tray()
-        threading.Thread(target=self._mic_thread, name="_mic_thread",
-                         daemon=True).start()
-        threading.Thread(target=self._audio_router_thread,
-                         name="_audio_router_thread", daemon=True).start()
+        # Start audio workers only after Tk enters its event loop; this makes
+        # device errors reportable in the chat instead of racing startup.
+        self.root.after(0, self._start_audio_threads)
 
     # ----- UI construction ---------------------------------------------------
 
@@ -1772,6 +1783,12 @@ class VoiceAssistantApp:
             return
         if self._busy_event.is_set():
             return
+        if not self._mic_ready.is_set() and self._mic_error:
+            detail = self._mic_error[:240]
+            self._append_message(
+                "system", f"Microphone unavailable: {detail}. Check the default input device or type instead.")
+            self._set_status("Mic failed — type instead")
+            return
         self._busy_event.set()
         self._set_busy(True)
         self._switch_listening("question")
@@ -1884,18 +1901,12 @@ class VoiceAssistantApp:
     # ----- Background workers ---------------------------------------------------
 
     def _greet(self) -> None:
+        """Show a welcome message without occupying the microphone with TTS."""
         greeting = (
             f"Hello — I'm {self.assistant_name}. Ask me anything, "
             "or tap Mic to speak."
         )
         self._append_message("assistant", greeting)
-
-        def delayed_speak() -> None:
-            time.sleep(1.5)
-            if self._running:
-                self._speak(greeting)
-
-        threading.Thread(target=delayed_speak, name="chat-greeting", daemon=True).start()
 
     def _speak(self, text: str) -> None:
         """Speak a line at the selected speed; cancel via the red Mic button."""
@@ -1904,41 +1915,58 @@ class VoiceAssistantApp:
         self._speaking_event.set()
         self._set_status("Speaking...")
         self._set_mic_speaking(True)
+        speech_error = ""
         try:
             with self.speech_lock:
                 try:
-                    speak(text, self._speed, cancel)
+                    played = speak(text, self._speed, cancel)
+                    if not played and not cancel.is_set():
+                        speech_error = (
+                            "gTTS failed and the offline pyttsx3 engine is unavailable"
+                        )
                 except Exception as error:  # noqa: BLE001 - try offline audio
                     print(f"[speech] primary playback failed: {error}; trying offline TTS")
                     try:
-                        _speak_offline(text, self._speed, cancel)
+                        played = _speak_offline(text, self._speed, cancel)
+                        if not played and not cancel.is_set():
+                            speech_error = "the offline pyttsx3 engine could not play audio"
                     except Exception as offline_error:  # noqa: BLE001 - preserve worker
-                        print(f"[speech] offline playback failed: {offline_error}")
+                        speech_error = " ".join(str(offline_error).split()) or type(offline_error).__name__
+                        print(f"[speech] offline playback failed: {speech_error}")
         finally:
             self._speaking_event.clear()
             self._set_mic_speaking(False)
             self._set_idle_status()
+        if speech_error:
+            self._append_message(
+                "system", f"Speech output failed: {speech_error[:240]}. "
+                          "Check the audio output device.")
+
+    def _start_audio_threads(self) -> None:
+        """Start the shared microphone and router after Tk's loop is live."""
+        if not self._running:
+            return
+        threading.Thread(target=self._mic_thread, name="_mic_thread",
+                         daemon=True).start()
+        threading.Thread(target=self._audio_router_thread,
+                         name="_audio_router_thread", daemon=True).start()
 
     def _mic_thread(self) -> None:
-        """Open the ONE shared mic stream and feed _mic_queue for the app's life.
-
-        Windows drivers allow only a single sd.InputStream, so this is the
-        only place in the whole program where a stream is opened. It tries
-        common device configs and reopens the stream if it ever stops.
-        """
+        """Own the ONE shared mic stream and feed the audio router."""
         while self._running:
+            stream = None
+            last_error = None
             try:
                 try:
                     device_rate = int(
                         sd.query_devices(kind="input")["default_samplerate"])
-                except Exception:  # noqa: BLE001 - no device info available
+                except Exception:  # noqa: BLE001 - query may fail without a default device
                     device_rate = SAMPLE_RATE
-                stream = None
-                last_error = None
                 for rate, channels in ((SAMPLE_RATE, 1), (SAMPLE_RATE, 2),
                                        (device_rate, 1), (device_rate, 2)):
+                    candidate = None
                     try:
-                        stream = sd.InputStream(
+                        candidate = sd.InputStream(
                             samplerate=rate,
                             channels=channels,
                             dtype="float32",
@@ -1946,17 +1974,32 @@ class VoiceAssistantApp:
                             callback=self._mic_callback,
                         )
                         self._mic_rate = rate
+                        candidate.start()
+                        stream = candidate
                         break
-                    except Exception as error:  # noqa: BLE001 - try next
+                    except Exception as error:  # noqa: BLE001 - try the next supported format
                         last_error = error
+                        if candidate is not None:
+                            try:
+                                candidate.close()
+                            except Exception:  # noqa: BLE001 - discard a failed candidate
+                                pass
                 if stream is None:
                     raise RuntimeError(
-                        f"Could not open the microphone: {last_error}")
-                stream.start()
+                        f"Could not open the microphone: {last_error or 'no input device found'}")
+
+                previous_error = self._mic_error
+                self._mic_ready.set()
+                self._mic_error = ""
+                self._mic_error_reported = ""
+                if previous_error and not (self._busy_event.is_set()
+                                           or self._speaking_event.is_set()):
+                    self._set_idle_status()
                 try:
                     while self._running and stream.active:
                         time.sleep(0.1)
                 finally:
+                    self._mic_ready.clear()
                     try:
                         stream.stop()
                         stream.close()
@@ -1965,8 +2008,17 @@ class VoiceAssistantApp:
                 if self._running:
                     print("[mic] stream stopped - reopening")
                     time.sleep(0.5)
-            except Exception as error:  # noqa: BLE001 - must never die
-                print(f"[mic] {error}")
+            except Exception as error:  # noqa: BLE001 - report the device failure and retry
+                self._mic_ready.clear()
+                self._mic_error = " ".join(str(error).split()) or type(error).__name__
+                print(f"[mic] {self._mic_error}")
+                if self._running and self._mic_error != self._mic_error_reported:
+                    self._mic_error_reported = self._mic_error
+                    detail = self._mic_error[:240]
+                    self._append_message(
+                        "system", f"Microphone unavailable: {detail}. "
+                                  "Check the default input device or type instead.")
+                    self._set_status("Mic failed — type instead")
                 time.sleep(1.0)
 
     def _mic_callback(self, indata, frames, time_info, status) -> None:
@@ -2032,10 +2084,14 @@ class VoiceAssistantApp:
             self._wake_unclear += 1
             if self._wake_unclear >= 5:
                 self._wake_unclear = 0
-                self._set_status(
-                    "Wake listener is running but can't understand "
-                    "audio — check the mic and internet connection."
-                )
+                detail = _LAST_TRANSCRIPTION_ERROR[:180]
+                if detail:
+                    self._set_status(f"Speech recognition unavailable: {detail}")
+                else:
+                    self._set_status(
+                        "Wake listener is running but can't understand "
+                        "audio — check the mic and internet connection."
+                    )
             return
         self._wake_unclear = 0
         if not re.search(rf"\b{re.escape(self.assistant_name)}\b",
@@ -2118,7 +2174,13 @@ class VoiceAssistantApp:
                 return
             question = transcribe(audio)
             if not question:
-                self._append_message("system", "Sorry, I couldn't understand that.")
+                if _LAST_TRANSCRIPTION_ERROR:
+                    detail = _LAST_TRANSCRIPTION_ERROR[:240]
+                    notice = (f"Speech recognition failed: {detail}. "
+                              "Check your internet connection or type instead.")
+                else:
+                    notice = "Sorry, I couldn't understand that. Try again or type instead."
+                self._append_message("system", notice)
                 self._set_idle_status()
                 self._busy_event.clear()
                 self._set_busy(False)
