@@ -200,7 +200,6 @@ def _response_json(method: str, url: str, *, provider: str,
 
 
 def _compat_base(config_module: Any, provider: str) -> str:
-    spec = provider_spec(provider)
     if provider in ("openai", "openrouter"):
         return "https://api.openai.com/v1" if provider == "openai" else "https://openrouter.ai/api/v1"
     return _validated_base(base_url(config_module, provider), provider)

@@ -73,6 +73,11 @@ AVATAR_FILE = "avatar.png"  # reference artwork and optional still avatar
 # Wake-word listener (shares the single mic stream with question recording)
 WAKE_CHECK_SECONDS = 0.5  # how often the rolling wake buffer is transcribed
 WAKE_WINDOW_SECONDS = 2.0  # rolling 2-second wake buffer sent to recognition
+WAKE_ONLY_TAILS = frozenset({
+    "", "i have a question", "i've got a question", "ive got a question",
+    "question", "yes", "yeah", "hello", "hi", "hey", "are you there",
+    "can you hear me", "wake up", "you there", "it's me", "its me",
+})
 
 # Microphone recording settings
 SAMPLE_RATE = 16000  # samples per second
@@ -1449,7 +1454,6 @@ class VoiceAssistantApp:
 
     def _save_model_picker(self) -> None:
         provider = self._picker_provider_id()
-        spec = chat_providers.provider_spec(provider)
         model = self._picker_model_var.get().strip()
         if not model:
             self._picker_status_var.set("Enter a model ID or load models first.")
