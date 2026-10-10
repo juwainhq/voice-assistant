@@ -59,8 +59,8 @@ memories and Allowed Apps stay in sync everywhere.
    (desktop: gTTS behind a hard 3-second `threading.Timer` cap, with an
    immediate offline **pyttsx3** fallback — engine created once at startup,
    `runAndWait()` always runs in its own thread; mobile: the phone's built-in
-   voice). The animated Grok Bot face reacts to every state: idle, listening,
-   thinking, talking, happy, sad.
+   voice). The animated portrait reacts to every state: idle, listening,
+   thinking, talking, happy, and sad.
 
 ### The desktop app (`main.py`)
 
@@ -82,13 +82,19 @@ memories and Allowed Apps stay in sync everywhere.
   programs **on the PC** where the server runs.
 - Works over your local Wi-Fi — nothing is exposed to the internet.
 
-### The Grok Bot face (both apps)
+### Animated desktop portrait
 
-A 1:1 Grok Bot model: a smooth pearl head with **two black vertical capsule eyes**
-and soft oval blush — no mouth, brows, glints or shine line. The whole expression
-lives in the capsules: they grow (listening), drift (thinking), lean outward (happy),
-droop (sad), chatter (talking) and squash to dots (blink). The ball itself only
-breathes — it never bounces.
+The desktop avatar now uses the supplied `avatar.png` as its character design,
+not as a still display: the eyes blink naturally, their catchlights shift with
+its gaze, the face breathes subtly, and the mouth smiles or opens/closes while
+Nova speaks. Listening shows an animated sound wave; thinking shows animated dots.
+The earlier still-image version remains available with `USE_IMAGE_AVATAR = True`,
+and the original animated Grok Bot remains available with `AVATAR_STYLE = "grokbot"`.
+
+### Mobile and classic Grok Bot
+
+The mobile PWA keeps its existing animated Grok Bot SVG. The classic desktop
+`BubblyFace` is also retained in `main.py` as a switchable alternative.
 
 ---
 
@@ -167,6 +173,7 @@ typing always works.
 | `mobile_server.py` | Mobile web server + shared assistant brain |
 | `web/` | Phone web app (PWA: HTML/JS/CSS, manifest, service worker) |
 | `config.py` | `GEMINI_API_KEY`, `AI_PROVIDER`, `OLLAMA_MODEL`, `ASSISTANT_NAME`, `ALLOWED_APPS` |
+| `avatar.png` | User-provided portrait artwork used by the animated desktop avatar |
 | `memory.json` | Long-term memory (auto-created, gitignored) |
 | `requirements.txt` | Python dependencies |
 | `preview/` | Browser mockups used while designing the UI |
@@ -176,6 +183,13 @@ typing always works.
 ## Updates (key points)
 
 > Every change to this project is recorded here as key points, newest first.
+
+**2026-10-10 — Animated desktop portrait based on the supplied avatar design**
+- The default header avatar now uses the supplied `avatar.png` as its design reference and animates it: natural blinking/closed eyelids, shifting eye catchlights, subtle breathing, changing smiles, and an open/close speaking mouth.
+- Listening and thinking keep their animated wave/dot indicators; the avatar changes expression through idle, happy, sad, thinking, listening, and talking states.
+- The old still-image mode remains selectable with `USE_IMAGE_AVATAR = True`; the previous animated Grok Bot remains selectable with `AVATAR_STYLE = "grokbot"`. Missing artwork still falls back to the classic animated face.
+- No image upload was altered; the submitted artwork remains in `avatar.jpg`/`avatar.png`. Mobile keeps its existing animated Grok Bot SVG.
+
 
 **2026-10-10 — Desktop Local AI option (Ollama) with Gemini fallback**
 - Added a provider radio to Settings: **Gemini API** or **Local AI (Ollama)**. The selected provider shows only its relevant field — the Gemini key or the Ollama model name.
@@ -194,7 +208,7 @@ typing always works.
 **2026-10-10 — Static image avatar with emotion overlays**
 - The header avatar is now a **static `avatar.png`** (loaded from the app folder via `PhotoImage`/PIL `ImageTk`) shown at 64×64 — swap in your own image any time.
 - Animated emoji-style overlay at the avatar's bottom-right: hidden when idle, an animated **sound wave** when listening, animated **"..." dots** when thinking, and pulsing **mouth-open dots** when speaking.
-- The animated drawn face (BubblyFace) is kept in `main.py` — set `USE_IMAGE_AVATAR = False` to change back; if `avatar.png` is missing the app falls back to it automatically.
+- The animated drawn face (BubblyFace) is kept in `main.py` as the classic fallback; the current avatar-mode switches are documented in the newest key point.
 
 **2026-10-10 — UI polish (desktop)**
 - Animated face in the header slimmed down (72 → 48) to give the chat more room.

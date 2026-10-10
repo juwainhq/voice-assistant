@@ -89,9 +89,12 @@ SPEEDS = {0: "slow", 1: "normal", 2: "fast"}
 FAST_RATE = 1.35  # playback rate for the "fast" voice speed
 STOP_RED = "#FF4444"  # mic button background while speaking (click to stop)
 
-# Avatar: set USE_IMAGE_AVATAR = False to bring back the drawn BubblyFace.
-USE_IMAGE_AVATAR = True
-AVATAR_FILE = "avatar.png"  # static avatar image, same folder as main.py
+# Avatar choices: the default animates the supplied portrait art. Set
+# USE_IMAGE_AVATAR=True for the old still-image view, or AVATAR_STYLE="grokbot"
+# to bring back the original animated Grok Bot face.
+USE_IMAGE_AVATAR = False
+AVATAR_STYLE = "portrait"  # "portrait" or "grokbot" (when image mode is off)
+AVATAR_FILE = "avatar.png"  # supplied portrait artwork, same folder as main.py
 
 # Wake-word listener (shares the single mic stream with question recording)
 WAKE_CHECK_SECONDS = 2.0  # how often the rolling wake buffer is transcribed
@@ -746,13 +749,12 @@ def _load_avatar_photo(size: int):
 
 
 class AvatarView(tk.Frame):
-    """Static avatar image with animated emotion overlays.
+    """Optional still-image version with animated state indicators.
 
-    The image (avatar.png) sits in the header at 64x64. A small overlay in
-    its bottom-right corner shows the state: hidden when idle, an animated
-    sound wave when listening, animated "..." dots when thinking, and
-    animated mouth-open dots when speaking. The old drawn face is kept in
-    BubblyFace below - set USE_IMAGE_AVATAR = False to switch back to it.
+    The default is AnimatedReferenceAvatar, which brings the same artwork to
+    life with blinking, eye movement, facial expressions, and a speaking mouth.
+    Set USE_IMAGE_AVATAR=True to use this original still-image view instead;
+    set AVATAR_STYLE="grokbot" to use the earlier animated Grok Bot.
     """
 
     FRAME_MS = 120  # overlay animation tick
@@ -823,6 +825,204 @@ class AvatarView(tk.Frame):
         else:
             self._show_overlay(None)
         self.after(self.FRAME_MS, self._tick)
+
+
+class AnimatedReferenceAvatar(tk.Canvas):
+    """Animated portrait based on the supplied avatar art.
+
+    Keeps the reference illustration as the character's design, then layers
+    expressive blinks, moving eye glints, a speaking mouth, and small listening
+    / thinking indicators over it. This makes the portrait feel alive without
+    replacing the user's artwork with a different character.
+    """
+
+    FRAME_MS = 80
+    LID_SKIN = "#FDEAE0"
+    LID_LINE = "#6B4945"
+    EYE_INK = "#2A1E1C"
+    MOUTH_INK = "#61343A"
+    MOUTH_TONGUE = "#E88B92"
+    WAVE_FRAMES = (
+        (0.35, 0.85, 0.50, 1.00, 0.45),
+        (0.85, 0.45, 1.00, 0.40, 0.80),
+        (0.50, 1.00, 0.40, 0.85, 0.60),
+        (1.00, 0.55, 0.85, 0.55, 0.95),
+    )
+
+    def __init__(self, parent, size: int = 64, **kwargs) -> None:
+        super().__init__(parent, width=size, height=size, bg="#222022",
+                         highlightthickness=0, borderwidth=0, **kwargs)
+        self.size = size
+        self.emotion = "idle"
+        self.ok = False
+        self._time = 0.0
+        self._frame = 0
+        self._blink_left = 0.0
+        self._blink_in = 2.8 + random.random() * 2.2
+        self._photo = _load_avatar_photo(size)
+        if self._photo is None:
+            return  # caller falls back to the classic drawn face
+        self.ok = True
+        self._image_item = self.create_image(
+            size / 2, size / 2, image=self._photo, anchor="center")
+        self._render()
+        self.after(self.FRAME_MS, self._tick)
+
+    def set_emotion(self, emotion: str) -> None:
+        """Set one of the app's normal avatar states."""
+        if emotion in ("idle", "happy", "listening", "thinking", "talking", "sad"):
+            self.emotion = emotion
+
+    def _tick(self) -> None:
+        dt = self.FRAME_MS / 1000.0
+        self._time += dt
+        self._frame += 1
+        if self._blink_left > 0:
+            self._blink_left = max(0.0, self._blink_left - dt)
+        else:
+            self._blink_in -= dt
+            if self._blink_in <= 0:
+                self._blink_left = 0.16
+                self._blink_in = 2.8 + random.random() * 2.4
+        self._render()
+        self.after(self.FRAME_MS, self._tick)
+
+    def _render(self) -> None:
+        """Redraw only the animated facial features above the reference art."""
+        scale = self.size / 64.0
+        breath = math.sin(self._time * 1.4) * 0.28 * scale
+        center = self.size / 2
+        self.coords(self._image_item, center, center + breath)
+        self.delete("motion")
+        if self._blink_left > 0:
+            self._draw_closed_eyes(scale, breath)
+        else:
+            self._draw_eye_glints(scale, breath)
+        self._draw_mouth(scale, breath)
+        self._draw_state_indicator(scale)
+
+    def _draw_eye_glints(self, scale: float, breath: float) -> None:
+        """Move the portrait's eye highlights slightly to animate its gaze."""
+        if self.emotion == "thinking":
+            gaze_x = 0.75 + math.sin(self._time * 1.2) * 0.16
+            gaze_y = -0.65
+        elif self.emotion == "listening":
+            gaze_x = math.sin(self._time * 2.4) * 0.28
+            gaze_y = math.sin(self._time * 2.0) * 0.18
+        elif self.emotion == "talking":
+            gaze_x = math.sin(self._time * 3.0) * 0.30
+            gaze_y = 0.10
+        else:
+            gaze_x = math.sin(self._time * 0.7) * 0.24
+            gaze_y = math.sin(self._time * 0.55) * 0.16
+
+        # The source illustration has one slim white catchlight in each eye.
+        for x, y in ((14.35, 32.0), (35.65, 38.75)):
+            px, py = x * scale, y * scale + breath
+            self.create_oval(
+                px - 0.95 * scale, py - 2.15 * scale,
+                px + 0.95 * scale, py + 2.15 * scale,
+                fill=self.EYE_INK, outline="", tags="motion",
+            )
+            gx, gy = px + gaze_x * scale, py + gaze_y * scale
+            self.create_oval(
+                gx - 0.62 * scale, gy - 1.62 * scale,
+                gx + 0.62 * scale, gy + 1.62 * scale,
+                fill=WHITE, outline="", tags="motion",
+            )
+
+    def _draw_closed_eyes(self, scale: float, breath: float) -> None:
+        """Cover the open eyes during a blink and draw soft closed lids."""
+        eyes = ((15.3, 34.2, 4.5, 5.8), (37.4, 40.3, 4.7, 5.7))
+        for x, y, rx, ry in eyes:
+            cx, cy = x * scale, y * scale + breath
+            self.create_oval(
+                cx - rx * scale, cy - ry * scale,
+                cx + rx * scale, cy + ry * scale,
+                fill=self.LID_SKIN, outline=self.LID_SKIN, tags="motion",
+            )
+            self.create_line(
+                cx - 3.0 * scale, cy + 0.15 * scale,
+                cx, cy + 1.15 * scale,
+                cx + 3.0 * scale, cy + 0.15 * scale,
+                fill=self.LID_LINE, width=max(1, 0.9 * scale),
+                smooth=True, splinesteps=8, capstyle=tk.ROUND, tags="motion",
+            )
+
+    def _draw_mouth(self, scale: float, breath: float) -> None:
+        """Keep the reference face mouthless at rest; animate it in speech."""
+        if self.emotion not in ("talking", "happy", "sad"):
+            return
+        cx, cy = 31.5 * scale, 50.8 * scale + breath
+        if self.emotion == "talking":
+            opening = abs(math.sin(self._time * 10.5))
+            if opening > 0.23:
+                rx = (1.55 + opening * 1.10) * scale
+                ry = (0.75 + opening * 1.75) * scale
+                self.create_oval(
+                    cx - rx, cy - ry, cx + rx, cy + ry,
+                    fill=self.MOUTH_INK, outline="#542D31",
+                    width=max(1, 0.45 * scale), tags="motion",
+                )
+                if opening > 0.60:
+                    self.create_oval(
+                        cx - 0.95 * scale, cy + 0.35 * scale,
+                        cx + 0.95 * scale, cy + 1.55 * scale,
+                        fill=self.MOUTH_TONGUE, outline="", tags="motion",
+                    )
+                return
+            points = (cx - 2.7 * scale, cy - 0.1 * scale,
+                      cx, cy + 1.2 * scale,
+                      cx + 2.7 * scale, cy - 0.1 * scale)
+        elif self.emotion == "sad":
+            points = (cx - 3.0 * scale, cy + 0.9 * scale,
+                      cx, cy - 0.5 * scale,
+                      cx + 3.0 * scale, cy + 0.9 * scale)
+        else:  # happy
+            points = (cx - 3.5 * scale, cy - 0.2 * scale,
+                      cx, cy + 2.0 * scale,
+                      cx + 3.5 * scale, cy - 0.2 * scale)
+        self.create_line(
+            *points, fill="#805751", width=max(1, 0.9 * scale),
+            smooth=True, splinesteps=8, capstyle=tk.ROUND, tags="motion",
+        )
+
+    def _draw_state_indicator(self, scale: float) -> None:
+        """Retain the tiny listening wave / thinking dots in the lower corner."""
+        if self.emotion not in ("listening", "thinking", "talking"):
+            return
+        x0, y0 = 48 * scale, 51 * scale
+        self.create_rectangle(
+            x0, y0, 64 * scale, 64 * scale,
+            fill=PANEL, outline="", tags="motion",
+        )
+        if self.emotion == "listening":
+            pattern = self.WAVE_FRAMES[self._frame % len(self.WAVE_FRAMES)]
+            bar_w, gap, mid, half = 1.7 * scale, 0.9 * scale, 58 * scale, 4 * scale
+            for index, height in enumerate(pattern):
+                x = (49.2 + index * 2.6) * scale
+                self.create_rectangle(
+                    x, mid - height * half, x + bar_w, mid + height * half,
+                    fill=WHITE, outline="", tags="motion",
+                )
+        elif self.emotion == "thinking":
+            active = self._frame % 3
+            for index in range(3):
+                x = (51.0 + index * 4.0) * scale
+                radius = (0.85 if index == active else 0.55) * scale
+                color = WHITE if index == active else MUTED
+                self.create_oval(
+                    x - radius, 58 * scale - radius,
+                    x + radius, 58 * scale + radius,
+                    fill=color, outline="", tags="motion",
+                )
+        else:
+            radius = (1.6 + (self._frame % 3) * 0.35) * scale
+            self.create_oval(
+                56 * scale - radius, 58 * scale - radius,
+                56 * scale + radius, 58 * scale + radius,
+                fill=WHITE, outline="", tags="motion",
+            )
 
 
 # ----------------------------------------------------------------------------
@@ -911,12 +1111,22 @@ class VoiceAssistantApp:
         header.pack(fill=tk.X, padx=18, pady=(12, 8))
         self.face = None
         if USE_IMAGE_AVATAR:
+            # Kept as a one-line switch if the user wants the original still.
             candidate = AvatarView(header, size=64)
+        elif AVATAR_STYLE == "grokbot":
+            # Original animated Grok Bot remains available for easy rollback.
+            self.face = BubblyFace(header, size=48)
+            candidate = None
+        else:
+            # Default: their portrait art, brought to life with blinks, gaze,
+            # expressions, and a mouth that moves with the speaking state.
+            candidate = AnimatedReferenceAvatar(header, size=64)
+        if candidate is not None:
             if candidate.ok:
                 self.face = candidate
             else:
                 candidate.destroy()
-        if self.face is None:  # image missing or disabled -> drawn face
+        if self.face is None:  # missing/unusable artwork -> classic animation
             self.face = BubblyFace(header, size=48)
         self.face.pack(side=tk.LEFT, padx=(0, 12))
         title_box = tk.Frame(header, bg=BG)
