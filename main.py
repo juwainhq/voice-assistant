@@ -1672,31 +1672,33 @@ class VoiceAssistantApp:
         ))
 
     def _ollama_reply(self, prompt: str) -> str:
-        """Send a conversation to the user's local Ollama server."""
-        if ollama is None:
-            raise RuntimeError(
-                "The ollama Python package is missing; install requirements.txt.")
+        """Send a conversation to the local Ollama server via HTTP REST API."""
+        import requests as _req
         messages = [
             {"role": "system", "content": self._system_instruction()},
             *self._ollama_history,
             {"role": "user", "content": prompt},
         ]
-        if self._ollama_client is None:
-            self._ollama_client = ollama.Client(host=OLLAMA_HOST)
         try:
-            response = self._ollama_client.chat(
-                model=self.ollama_model,
-                messages=messages,
+            resp = _req.post(
+                f"{OLLAMA_HOST}/api/chat",
+                json={
+                    "model": self.ollama_model,
+                    "messages": messages,
+                    "stream": False,
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            answer = (data.get("message") or {}).get("content", "").strip()
+        except _req.exceptions.ConnectionError:
+            raise RuntimeError(
+                f"Cannot connect to Ollama at {OLLAMA_HOST}. "
+                "Make sure the Ollama app is open and running."
             )
         except Exception as e:
-            raise RuntimeError(
-                f"Ollama error (model='{self.ollama_model}', host={OLLAMA_HOST}): {e}"
-            ) from e
-        message = (response.get("message") if isinstance(response, dict)
-                   else getattr(response, "message", None))
-        content = (message.get("content", "") if isinstance(message, dict)
-                   else getattr(message, "content", ""))
-        answer = str(content or "").strip()
+            raise RuntimeError(f"Ollama request failed: {e}") from e
         if not answer:
             raise RuntimeError("Ollama returned an empty response.")
         self._remember_ollama_turn(prompt, answer)
