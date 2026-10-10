@@ -169,6 +169,14 @@ typing always works.
 
 > Every change to this project is recorded here as key points, newest first.
 
+**2026-10-10 — UI polish (desktop)**
+- Animated face in the header slimmed down (72 → 48) to give the chat more room.
+- User messages now sit in a **#141414 bubble** with 6px padding (visually distinct from assistant replies).
+- Assistant messages show the assistant name in **#8C8C8C** directly before the message text ("Nova: …").
+- Status line is always visible — it now shows **"Say Nova to start"** when idle instead of going blank.
+- The gear button is labeled **"⚙ Settings"** so it's obvious.
+- Thin **#242424 separator line** added between the header and the chat window.
+
 **2026-10-10 — Speech robustness (gTTS never hangs)**
 - Every gTTS call now runs in a worker thread behind a hard **3-second `threading.Timer`** cap — a hanging or failing internet request can no longer stall the app.
 - On failure or timeout the reply is spoken **immediately** with the offline **pyttsx3** engine.

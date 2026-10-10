@@ -776,7 +776,7 @@ class VoiceAssistantApp:
         # Header: avatar + name on the left; status dot + gear on the right.
         header = tk.Frame(self.root, bg=BG)
         header.pack(fill=tk.X, padx=18, pady=(12, 8))
-        self.face = BubblyFace(header, size=72)
+        self.face = BubblyFace(header, size=48)
         self.face.pack(side=tk.LEFT, padx=(0, 12))
         title_box = tk.Frame(header, bg=BG)
         title_box.pack(side=tk.LEFT)
@@ -790,10 +790,10 @@ class VoiceAssistantApp:
         ).pack(anchor="w")
 
         self.gear_button = tk.Button(
-            header, text="\u2699", font=("Segoe UI", 14),
+            header, text="\u2699 Settings", font=FONT_BOLD,
             command=self._open_settings,
             bg=GRAY, fg=TEXT, activebackground=WHITE, activeforeground=BLACK,
-            relief=tk.FLAT, padx=10, pady=2, cursor="hand2", borderwidth=0,
+            relief=tk.FLAT, padx=14, pady=8, cursor="hand2", borderwidth=0,
         )
         self.gear_button.pack(side=tk.RIGHT)
         self.status_dot = tk.Canvas(header, width=12, height=12, bg=BG,
@@ -801,6 +801,9 @@ class VoiceAssistantApp:
         self.status_dot.pack(side=tk.RIGHT, padx=(0, 10))
         self._dot = self.status_dot.create_oval(1, 1, 11, 11,
                                                 fill=MUTED, outline="")
+
+        # Thin #242424 separator line between the header and the chat window.
+        tk.Frame(self.root, bg=ENTRY_BORDER, height=1).pack(fill=tk.X)
 
         # Chat window (conversation history) - full width, no border.
         chat_frame = tk.Frame(self.root, bg=CARD)
@@ -824,6 +827,7 @@ class VoiceAssistantApp:
                                      font=FONT_BOLD)
         self.chat_view.tag_configure("user_text", foreground=TEXT,
                                      justify=tk.RIGHT,
+                                     background=GRAY, spacing1=6, spacing3=6,
                                      lmargin1=60, lmargin2=60)
         self.chat_view.tag_configure("assistant_text", foreground=MUTED,
                                      justify=tk.LEFT)
@@ -863,7 +867,8 @@ class VoiceAssistantApp:
 
         # Tiny status line below the input.
         self.status_label = tk.Label(
-            bottom, text="Ready", font=("Segoe UI", 8), bg=BG, fg=MUTED,
+            bottom, text=f"Say {self.assistant_name} to start",
+            font=("Segoe UI", 8), bg=BG, fg=MUTED,
             anchor="w",
         )
         self.status_label.pack(fill=tk.X, pady=(6, 0))
@@ -1066,8 +1071,8 @@ class VoiceAssistantApp:
         self.root.after(0, apply)
 
     def _set_idle_status(self) -> None:
-        """Status shown whenever the passive wake listener is armed."""
-        self._set_status(f'Ready — say "Hey {self.assistant_name}" to talk')
+        """Status shown when idle - always visible, never blank."""
+        self._set_status(f"Say {self.assistant_name} to start")
 
     def _append_message(self, role: str, text: str) -> None:
         def insert() -> None:
@@ -1077,9 +1082,25 @@ class VoiceAssistantApp:
             copy_tag = f"copy_{self._msg_counter}"
             self._copy_texts[copy_tag] = text
             self.chat_view.configure(state=tk.NORMAL)
-            self.chat_view.insert(tk.END, f"{names[role]}", f"{role}_name")
-            self.chat_view.insert(tk.END, "   [Copy]\n", ("copy_link", copy_tag))
-            self.chat_view.insert(tk.END, f"{text}\n\n", f"{role}_text")
+            if role == "user":
+                # User: name row, then a #141414 bubble with 6px padding.
+                self.chat_view.insert(tk.END, f"{names[role]}", f"{role}_name")
+                self.chat_view.insert(tk.END, "   [Copy]\n",
+                                      ("copy_link", copy_tag))
+                self.chat_view.insert(tk.END, "   ", f"{role}_text")
+                self.chat_view.insert(tk.END, f"{text}   ", f"{role}_text")
+                self.chat_view.insert(tk.END, "\n\n")
+            elif role == "assistant":
+                # Assistant: the name in #8C8C8C before the message text.
+                self.chat_view.insert(tk.END, f"{names[role]}: ", f"{role}_name")
+                self.chat_view.insert(tk.END, f"{text}   ", f"{role}_text")
+                self.chat_view.insert(tk.END, "[Copy]\n\n",
+                                      ("copy_link", copy_tag))
+            else:
+                self.chat_view.insert(tk.END, f"{names[role]}", f"{role}_name")
+                self.chat_view.insert(tk.END, "   [Copy]\n",
+                                      ("copy_link", copy_tag))
+                self.chat_view.insert(tk.END, f"{text}\n\n", f"{role}_text")
             self.chat_view.configure(state=tk.DISABLED)
             self.chat_view.tag_bind(
                 copy_tag, "<Button-1>",
