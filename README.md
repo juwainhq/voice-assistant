@@ -1,8 +1,9 @@
 # Nova — Voice Assistant
 
-A voice assistant you can talk to on your **desktop** and on your **phone**, powered by
-Google Gemini (`gemini-3.5-flash-lite`). Say "Hey Nova" and ask anything — it can chat,
-search the web, remember things about you, and open your apps.
+A voice assistant you can talk to on your **desktop** and on your **phone**. The desktop
+can use Google Gemini (`gemini-3.5-flash-lite`) or a local Ollama model; the mobile
+companion uses Gemini. Say "Hey Nova" and ask anything — Nova can chat, search the web,
+remember things about you, and open your apps.
 
 ---
 
@@ -27,7 +28,7 @@ memories and Allowed Apps stay in sync everywhere.
                     │  2. local commands     │
                     │  3. open [app]         │
                     │  4. "search for ..."   │
-                    │  5. Gemini chat        │
+                    │  5. Gemini / Ollama  │
                     └────────────────────────┘
 ```
 
@@ -51,9 +52,9 @@ memories and Allowed Apps stay in sync everywhere.
      "help", "repeat that", "goodbye" — answered instantly, no internet needed.
    - **"open [app]"** — launches the program on the PC if it's on the
      Allowed Apps list (anything else answers *"That app isn't on my allowed list."*).
-   - **"search for …"** — DuckDuckGo results are fetched and given to Gemini as context.
-   - **Anything else** — sent to Gemini. Things remembered about you are injected
-     into the system prompt, so Nova uses them naturally.
+   - **"search for …"** — DuckDuckGo results are fetched and given to the selected AI as context.
+   - **Anything else** — sent to the selected AI. Desktop supports Gemini or Local AI
+     (Ollama); mobile uses Gemini. Things remembered about you are added to the prompt.
 4. **Reply** — the answer appears in the chat and is **spoken out loud**
    (desktop: gTTS behind a hard 3-second `threading.Timer` cap, with an
    immediate offline **pyttsx3** fallback — engine created once at startup,
@@ -66,9 +67,9 @@ memories and Allowed Apps stay in sync everywhere.
 - tkinter window (900×620, dark monochrome) with header, full-width chat and input row.
 - Header: avatar + name on the left; **status dot** (gray = idle, white = listening,
   blinking = speaking) and a **⚙ gear** button that opens the settings popup
-  (API key, name, voice speed, Allowed Apps).
+  (AI provider, Gemini API key or Ollama model, name, voice speed, Allowed Apps).
 - Mic button turns **red (#FF4444)** while Nova speaks — tap it to stop mid-sentence.
-- Typing dots while Gemini thinks, `[Copy]` links on every message, Clear chat.
+- Typing dots while the selected AI thinks, `[Copy]` links on every message, Clear chat.
 - Closing the window **minimizes to the system tray** — click the icon to reopen.
 - Voice speed: slow / normal / fast (gTTS slow mode, or faster playback).
 
@@ -100,9 +101,13 @@ pip install -r requirements.txt
 python main.py
 ```
 
-1. Click the **⚙ gear** and paste your **Gemini API key**
-   (from <https://aistudio.google.com/apikey>) — it is stored in `config.py`.
-2. Click **Mic** (or type) and talk. Say **"Hey Nova"** any time to go hands-free.
+1. Click the **⚙ gear** and choose **Gemini API** (paste a key from
+   <https://aistudio.google.com/apikey>) or **Local AI (Ollama)**.
+2. For Local AI, install and start Ollama, then download a model such as
+   `ollama pull phi3:mini`; Settings defaults to `phi3:mini`. Ollama must be running
+   at `http://localhost:11434`. If it is unavailable, Nova falls back to Gemini
+   (which requires a saved API key) and displays a chat notice.
+3. Click **Mic** (or type) and talk. Say **"Hey Nova"** any time to go hands-free.
 
 ### On your phone
 
@@ -115,8 +120,8 @@ phone's browser (same Wi-Fi). Use **"Add to Home Screen"** to install Nova like 
 app. Voice input works best in Chrome/Android; on iOS Safari it is more limited —
 typing always works.
 
-> No extra packages: the mobile server uses only the standard library plus the
-> existing `google-genai` and `requests` dependencies.
+> No Ollama connection is used by the mobile companion; it continues to use Gemini.
+> The mobile server uses only the standard library plus `google-genai` and `requests`.
 
 ---
 
@@ -128,8 +133,10 @@ typing always works.
 - **Memory** — names and facts persist in `memory.json` between sessions.
 - **Web search** — "search for …" answers with DuckDuckGo context and sources.
 - **App launcher** — "open [app]" runs programs from your Allowed Apps list.
-- **Settings** — Gemini API key, assistant name (wake word follows it), voice speed,
-  Allowed Apps — saved to `config.py`.
+- **Settings** — choose **Gemini API** or **Local AI (Ollama)**. Gemini uses an API
+  key; Ollama uses a configurable model (default `phi3:mini`). Ollama failures fall
+  back to Gemini with a chat notice. Provider, model, assistant name, voice speed and
+  Allowed Apps are saved to `config.py`.
 - **Tray icon** — closing the desktop window keeps Nova running in the background.
 - **Mobile PWA** — same assistant in your pocket over local Wi-Fi.
 
@@ -159,7 +166,7 @@ typing always works.
 | `main.py` | Desktop app (tkinter, mic, TTS, wake listener, tray) |
 | `mobile_server.py` | Mobile web server + shared assistant brain |
 | `web/` | Phone web app (PWA: HTML/JS/CSS, manifest, service worker) |
-| `config.py` | `GEMINI_API_KEY`, `ASSISTANT_NAME`, `ALLOWED_APPS` (edited by Settings) |
+| `config.py` | `GEMINI_API_KEY`, `AI_PROVIDER`, `OLLAMA_MODEL`, `ASSISTANT_NAME`, `ALLOWED_APPS` |
 | `memory.json` | Long-term memory (auto-created, gitignored) |
 | `requirements.txt` | Python dependencies |
 | `preview/` | Browser mockups used while designing the UI |
@@ -169,6 +176,13 @@ typing always works.
 ## Updates (key points)
 
 > Every change to this project is recorded here as key points, newest first.
+
+**2026-10-10 — Desktop Local AI option (Ollama) with Gemini fallback**
+- Added a provider radio to Settings: **Gemini API** or **Local AI (Ollama)**. The selected provider shows only its relevant field — the Gemini key or the Ollama model name.
+- Ollama uses the Python `ollama` library at `http://localhost:11434`; the configurable model defaults to `phi3:mini`. Provider/model persist in `config.py`; existing config files default safely to Gemini.
+- Local conversations use the same assistant prompt and remembered facts. Search results remain context for the selected model; chat history is retained per provider and reset by Clear chat.
+- If the Ollama package/server/model errors, Nova posts a Notice in chat and automatically tries Gemini. If Gemini is not configured or also fails, Nova explains that in the chat rather than crashing.
+- Added `ollama` to `requirements.txt`. This option is desktop-only; the mobile companion remains on Gemini, and its config save preserves the desktop provider/model settings.
 
 **2026-10-10 — Mic pipeline v2: `_mic_queue` + `_audio_router_thread` (exact spec)**
 - `_mic_thread` opens exactly one `sd.InputStream` and runs permanently, pushing raw chunks into `_mic_queue`.

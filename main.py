@@ -8,13 +8,14 @@ Layout:
     - Input row: text entry with Mic + Send buttons on the right. While the
       assistant speaks the Mic button turns red — click it to stop.
     - Status line below the input: "Listening...", "Thinking...", "Speaking...".
-    - Typing indicator dots while Gemini is thinking.
-    - Settings popup (gear button): Gemini API key, assistant name, voice
-      speed, Allowed Apps.
+    - Typing indicator dots while the selected AI is thinking.
+    - Settings popup (gear button): Gemini API or Local AI (Ollama), assistant
+      name, voice speed, Allowed Apps.
     - Closing the window minimizes to the system tray (pystray).
 
-The AI brain is Gemini (gemini-3.5-flash-lite). Voice output uses gTTS with
-a pyttsx3 offline fallback when the network is unavailable. Speech is played
+The AI brain can be Gemini (gemini-3.5-flash-lite) or local Ollama. Voice
+output uses gTTS with a pyttsx3 offline fallback when the network is unavailable.
+Speech is played
 through sounddevice (so speed control and Stop work) with playsound as a
 fallback. Saying "search for ..." triggers a DuckDuckGo web search; saying
 "open [app]" launches an app from the Allowed Apps list.
@@ -41,6 +42,11 @@ from playsound import playsound
 from google import genai
 from google.genai import types
 import tkinter as tk
+
+try:
+    import ollama
+except ImportError:  # pragma: no cover - Local AI is an optional mode
+    ollama = None
 
 try:
     import miniaudio  # mp3 -> PCM decoding (speed control + interruptible playback)
@@ -73,6 +79,10 @@ import config
 
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_ASSISTANT_NAME = "Nova"
+DEFAULT_OLLAMA_MODEL = "phi3:mini"
+OLLAMA_HOST = "http://localhost:11434"
+AI_PROVIDER_GEMINI = "gemini"
+AI_PROVIDER_OLLAMA = "ollama"
 PLACEHOLDER_KEY = "YOUR_GEMINI_API_KEY_HERE"
 NO_APP_REPLY = "That app isn't on my allowed list."
 SPEEDS = {0: "slow", 1: "normal", 2: "fast"}
@@ -435,9 +445,18 @@ def duckduckgo_search(query: str, max_results: int = 5) -> str:
 
 
 def save_config(api_key: str, assistant_name: str,
-                allowed_apps: dict | None = None) -> None:
+                allowed_apps: dict | None = None,
+                ai_provider: str | None = None,
+                ollama_model: str | None = None) -> None:
     """Persist the settings back to config.py."""
     apps = allowed_apps if allowed_apps is not None else {}
+    provider = ai_provider or getattr(config, "AI_PROVIDER", AI_PROVIDER_GEMINI)
+    if provider not in (AI_PROVIDER_GEMINI, AI_PROVIDER_OLLAMA):
+        provider = AI_PROVIDER_GEMINI
+    model = (ollama_model or getattr(config, "OLLAMA_MODEL",
+                                     DEFAULT_OLLAMA_MODEL)).strip()
+    if not model:
+        model = DEFAULT_OLLAMA_MODEL
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
     content = (
         '"""Configuration settings for the voice assistant."""\n\n'
@@ -445,6 +464,10 @@ def save_config(api_key: str, assistant_name: str,
         "https://aistudio.google.com/apikey\n"
         "# NOTE: Do not commit a real API key to a public repository.\n"
         f"GEMINI_API_KEY = {api_key!r}\n\n"
+        "# AI provider used by the desktop app: 'gemini' or 'ollama'.\n"
+        f"AI_PROVIDER = {provider!r}\n\n"
+        "# Ollama model name (download with: ollama pull <model>).\n"
+        f"OLLAMA_MODEL = {model!r}\n\n"
         "# Name the assistant introduces itself with (editable in the app's Settings).\n"
         f"ASSISTANT_NAME = {assistant_name!r}\n\n"
         "# Apps the assistant may open with 'open [app name]'.\n"
@@ -812,6 +835,15 @@ class VoiceAssistantApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.api_key = getattr(config, "GEMINI_API_KEY", "")
+        self.ai_provider = str(getattr(config, "AI_PROVIDER", AI_PROVIDER_GEMINI)).lower()
+        if self.ai_provider not in (AI_PROVIDER_GEMINI, AI_PROVIDER_OLLAMA):
+            self.ai_provider = AI_PROVIDER_GEMINI
+        self.ollama_model = str(
+            getattr(config, "OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+            or DEFAULT_OLLAMA_MODEL
+        ).strip()
+        if not self.ollama_model:
+            self.ollama_model = DEFAULT_OLLAMA_MODEL
         self.assistant_name = getattr(config, "ASSISTANT_NAME", DEFAULT_ASSISTANT_NAME)
         self.allowed_apps: dict[str, str] = dict(
             getattr(config, "ALLOWED_APPS", {}) or {}
@@ -819,6 +851,9 @@ class VoiceAssistantApp:
         self.memory = load_memory()  # user name + remembered facts
         self.client = None
         self.chat = None
+        self._gemini_error = ""
+        self._ollama_client = None
+        self._ollama_history: list[dict[str, str]] = []
         self.tray_icon = None
 
         self.speech_lock = threading.Lock()
@@ -859,7 +894,7 @@ class VoiceAssistantApp:
         root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
 
         self._build_ui()
-        self._configure_gemini()
+        self._configure_ai()
         init_offline_speech()  # pyttsx3 fallback engine, created once
         self._greet()
         self._setup_tray()
@@ -988,7 +1023,7 @@ class VoiceAssistantApp:
         win = tk.Toplevel(self.root)
         win.title("Settings")
         win.configure(bg=BG)
-        win.geometry("440x620")
+        win.geometry("440x680")
         win.transient(self.root)
         self._settings_win = win
 
@@ -1001,9 +1036,10 @@ class VoiceAssistantApp:
             tk.Label(body, text=text, font=FONT_SMALL,
                      bg=BG, fg=MUTED).pack(anchor="w", pady=(12, 0))
 
-        def _entry(show: str = "") -> tk.Entry:
+        def _entry(show: str = "", parent=None) -> tk.Entry:
+            parent = parent or body
             widget = tk.Entry(
-                body, show=show, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
+                parent, show=show, bg=ENTRY_BG, fg=TEXT, insertbackground=TEXT,
                 font=FONT, relief=tk.FLAT, highlightthickness=1,
                 highlightbackground=ENTRY_BORDER, highlightcolor=WHITE,
                 borderwidth=0,
@@ -1015,12 +1051,43 @@ class VoiceAssistantApp:
         self.name_entry = _entry()
         self.name_entry.insert(0, self.assistant_name)
 
-        _label("GEMINI API KEY")
-        self.key_entry = _entry(show="\u2022")
+        _label("AI PROVIDER")
+        self._ai_provider_var = tk.StringVar(value=self.ai_provider)
+        provider_row = tk.Frame(body, bg=BG)
+        provider_row.pack(fill=tk.X, pady=(4, 0))
+        for text, value in (("Gemini API", AI_PROVIDER_GEMINI),
+                            ("Local AI (Ollama)", AI_PROVIDER_OLLAMA)):
+            tk.Radiobutton(
+                provider_row, text=text, value=value,
+                variable=self._ai_provider_var,
+                command=self._update_provider_fields, bg=BG, fg=TEXT,
+                selectcolor=GRAY, activebackground=BG,
+                activeforeground=WHITE, highlightthickness=0, borderwidth=0,
+                font=FONT,
+            ).pack(side=tk.LEFT, expand=True, anchor="w")
+
+        self._provider_fields = tk.Frame(body, bg=BG)
+        self._provider_fields.pack(fill=tk.X)
+        self._gemini_fields = tk.Frame(self._provider_fields, bg=BG)
+        tk.Label(self._gemini_fields, text="GEMINI API KEY", font=FONT_SMALL,
+                 bg=BG, fg=MUTED).pack(anchor="w", pady=(8, 0))
+        self.key_entry = _entry(show="\u2022", parent=self._gemini_fields)
         if self.api_key and self.api_key != PLACEHOLDER_KEY:
             self.key_entry.insert(0, self.api_key)
-        tk.Label(body, text="Stored in config.py", font=("Segoe UI", 8),
-                 bg=BG, fg=MUTED).pack(anchor="w")
+        tk.Label(self._gemini_fields, text="Stored in config.py",
+                 font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(anchor="w")
+
+        self._ollama_fields = tk.Frame(self._provider_fields, bg=BG)
+        tk.Label(self._ollama_fields, text="OLLAMA MODEL", font=FONT_SMALL,
+                 bg=BG, fg=MUTED).pack(anchor="w", pady=(8, 0))
+        self.ollama_model_entry = _entry(parent=self._ollama_fields)
+        self.ollama_model_entry.insert(0, self.ollama_model)
+        tk.Label(
+            self._ollama_fields,
+            text=f"Default: {DEFAULT_OLLAMA_MODEL} · Server: {OLLAMA_HOST}",
+            font=("Segoe UI", 8), bg=BG, fg=MUTED,
+        ).pack(anchor="w")
+        self._update_provider_fields()
 
         _label("VOICE SPEED")
         self._speed_var = tk.StringVar(value=self._speed)
@@ -1083,6 +1150,17 @@ class VoiceAssistantApp:
         )
         clear_button.pack(fill=tk.X, pady=(8, 0))
 
+    def _update_provider_fields(self) -> None:
+        """Show only the credential/model field for the selected provider."""
+        if not hasattr(self, "_gemini_fields"):
+            return
+        self._gemini_fields.pack_forget()
+        self._ollama_fields.pack_forget()
+        if self._ai_provider_var.get() == AI_PROVIDER_OLLAMA:
+            self._ollama_fields.pack(fill=tk.X)
+        else:
+            self._gemini_fields.pack(fill=tk.X)
+
     def _set_mic_speaking(self, speaking: bool) -> None:
         """Mic button doubles as Stop: red while the assistant speaks."""
 
@@ -1132,18 +1210,11 @@ class VoiceAssistantApp:
 
     # ----- Gemini -----------------------------------------------------------
 
-    def _configure_gemini(self) -> None:
-        if not self.api_key or self.api_key == PLACEHOLDER_KEY:
-            self.client = None
-            self.chat = None
-            self._set_status("Set your Gemini API key in Settings to start chatting.")
-            return
-        self.client = genai.Client(api_key=self.api_key)
-        history = self.chat.get_history() if self.chat is not None else []
+    def _system_instruction(self) -> str:
+        """Build the shared assistant prompt, including saved user memories."""
         memory_notes = []
         if self.memory.get("user_name"):
-            memory_notes.append(
-                f"- The user's name is {self.memory['user_name']}.")
+            memory_notes.append(f"- The user's name is {self.memory['user_name']}.")
         for fact in self.memory.get("facts", []):
             memory_notes.append(f"- Remembered about the user: {fact}.")
         memory_block = ""
@@ -1153,17 +1224,87 @@ class VoiceAssistantApp:
                 "(use them naturally in conversation; never recite this list):\n"
                 + "\n".join(memory_notes)
             )
-        self.chat = self.client.chats.create(
-            model=GEMINI_MODEL,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    f"You are {self.assistant_name}, a friendly voice assistant. "
-                    "Keep answers clear and conversational." + memory_block
-                ),
-            ),
-            history=list(history),
+        return (
+            f"You are {self.assistant_name}, a friendly voice assistant. "
+            "Keep answers clear and conversational." + memory_block
         )
-        self._set_idle_status()
+
+    def _configure_gemini(self) -> None:
+        """Prepare Gemini for normal use or as the Local AI fallback."""
+        self._gemini_error = ""
+        if not self.api_key or self.api_key == PLACEHOLDER_KEY:
+            self.client = None
+            self.chat = None
+            self._gemini_error = "Gemini API key is not configured."
+            return
+        try:
+            history = self.chat.get_history() if self.chat is not None else []
+            self.client = genai.Client(api_key=self.api_key)
+            self.chat = self.client.chats.create(
+                model=GEMINI_MODEL,
+                config=types.GenerateContentConfig(
+                    system_instruction=self._system_instruction(),
+                ),
+                history=list(history),
+            )
+        except Exception as error:  # noqa: BLE001 - Local AI can still work
+            self.client = None
+            self.chat = None
+            self._gemini_error = str(error) or type(error).__name__
+
+    def _configure_ai(self) -> None:
+        """Configure the selected provider and keep Gemini ready for fallback."""
+        self._configure_gemini()
+        if self.ai_provider == AI_PROVIDER_OLLAMA:
+            self._set_idle_status()
+        elif self.chat is None:
+            if self._gemini_error == "Gemini API key is not configured.":
+                self._set_status(
+                    "Set your Gemini API key in Settings to start chatting.")
+            else:
+                self._set_status(f"Gemini setup problem: {self._gemini_error}")
+        else:
+            self._set_idle_status()
+
+    def _gemini_reply(self, prompt: str) -> str:
+        """Send one prompt to the configured Gemini conversation."""
+        if self.chat is None:
+            raise RuntimeError(self._gemini_error or
+                               "Gemini API is not configured.")
+        response = self.chat.send_message(prompt)
+        return (response.text or "").strip() or "(no response)"
+
+    def _remember_ollama_turn(self, prompt: str, answer: str) -> None:
+        self._ollama_history.extend((
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": answer},
+        ))
+
+    def _ollama_reply(self, prompt: str) -> str:
+        """Send a conversation to the user's local Ollama server."""
+        if ollama is None:
+            raise RuntimeError(
+                "The ollama Python package is missing; install requirements.txt.")
+        messages = [
+            {"role": "system", "content": self._system_instruction()},
+            *self._ollama_history,
+            {"role": "user", "content": prompt},
+        ]
+        if self._ollama_client is None:
+            self._ollama_client = ollama.Client(host=OLLAMA_HOST)
+        response = self._ollama_client.chat(
+            model=self.ollama_model,
+            messages=messages,
+        )
+        message = (response.get("message") if isinstance(response, dict)
+                   else getattr(response, "message", None))
+        content = (message.get("content", "") if isinstance(message, dict)
+                   else getattr(message, "content", ""))
+        answer = str(content or "").strip()
+        if not answer:
+            raise RuntimeError("Ollama returned an empty response.")
+        self._remember_ollama_turn(prompt, answer)
+        return answer
 
     # ----- Thread-safe UI updates -------------------------------------------
 
@@ -1325,14 +1466,22 @@ class VoiceAssistantApp:
         self._copy_texts.clear()
         self._typing_start = "1.0"
         self.chat = None
-        self._configure_gemini()  # fresh chat with empty history
+        self._ollama_history.clear()
+        self._configure_ai()  # fresh chat with empty history
         self._set_status("Chat cleared — memory reset.")
 
     def save_settings(self) -> None:
         self.assistant_name = self.name_entry.get().strip() or DEFAULT_ASSISTANT_NAME
         self.api_key = self.key_entry.get().strip()
-        save_config(self.api_key, self.assistant_name, self.allowed_apps)
-        self._configure_gemini()
+        self.ai_provider = self._ai_provider_var.get()
+        if self.ai_provider not in (AI_PROVIDER_GEMINI, AI_PROVIDER_OLLAMA):
+            self.ai_provider = AI_PROVIDER_GEMINI
+        self.ollama_model = (
+            self.ollama_model_entry.get().strip() or DEFAULT_OLLAMA_MODEL
+        )
+        save_config(self.api_key, self.assistant_name, self.allowed_apps,
+                    self.ai_provider, self.ollama_model)
+        self._configure_ai()
         self.title_label.config(text=self.assistant_name)
         self.root.title(f"{self.assistant_name} — Voice Assistant")
         self._set_status("Settings saved.")
@@ -1366,7 +1515,8 @@ class VoiceAssistantApp:
             self._set_status("Enter both an app name and a file path.")
             return
         self.allowed_apps[name] = path
-        save_config(self.api_key, self.assistant_name, self.allowed_apps)
+        save_config(self.api_key, self.assistant_name, self.allowed_apps,
+                    self.ai_provider, self.ollama_model)
         self._refresh_apps_list()
         self._set_status(f"Added '{name}' to Allowed Apps.")
 
@@ -1377,7 +1527,8 @@ class VoiceAssistantApp:
             return
         name = self.apps_list.get(selection[0])
         self.allowed_apps.pop(name, None)
-        save_config(self.api_key, self.assistant_name, self.allowed_apps)
+        save_config(self.api_key, self.assistant_name, self.allowed_apps,
+                    self.ai_provider, self.ollama_model)
         self._refresh_apps_list()
         self._set_status(f"Removed '{name}' from Allowed Apps.")
 
@@ -1677,7 +1828,7 @@ class VoiceAssistantApp:
                 return "I didn't catch a name. Say 'my name is' followed by your name."
             self.memory["user_name"] = name
             save_memory(self.memory)
-            self._configure_gemini()
+            self._configure_ai()
             return f"Got it — I'll call you {name}."
         if action == "remember":
             fact = payload.strip()
@@ -1687,7 +1838,7 @@ class VoiceAssistantApp:
                 return "I already remember that."
             self.memory["facts"].append(fact)
             save_memory(self.memory)
-            self._configure_gemini()
+            self._configure_ai()
             return f"Okay, I'll remember that {fact}."
         if action == "forget":
             before = len(self.memory["facts"])
@@ -1696,19 +1847,19 @@ class VoiceAssistantApp:
                 if payload.strip().lower() not in f.lower()
             ]
             save_memory(self.memory)
-            self._configure_gemini()
+            self._configure_ai()
             if len(self.memory["facts"]) < before:
                 return "Done — I forgot that."
             return f"I don't have a memory matching '{payload}'."
         if action == "forget_name":
             self.memory["user_name"] = ""
             save_memory(self.memory)
-            self._configure_gemini()
+            self._configure_ai()
             return "Okay, I forgot your name."
         if action == "forget_all":
             self.memory = {"user_name": "", "facts": []}
             save_memory(self.memory)
-            self._configure_gemini()
+            self._configure_ai()
             return "Okay, I forgot everything."
         if action == "recall_name":
             if self.memory.get("user_name"):
@@ -1728,7 +1879,7 @@ class VoiceAssistantApp:
         return "I couldn't apply that memory command."
 
     def _local_command(self, question: str) -> str | None:
-        """Handle built-in commands locally; return None to defer to Gemini."""
+        """Handle built-in commands locally; return None to defer to the AI."""
         memory_cmd = parse_memory_command(question)
         if memory_cmd is not None:
             return self._apply_memory_command(*memory_cmd)
@@ -1765,7 +1916,7 @@ class VoiceAssistantApp:
         self._busy_event.set()
         self._set_busy(True)
 
-        # Built-in commands: instant, no Gemini round-trip needed.
+        # Built-in commands: instant, no AI round-trip needed.
         local_answer = self._local_command(question)
         if local_answer is not None:
             self._last_answer = local_answer
@@ -1789,7 +1940,7 @@ class VoiceAssistantApp:
             self._set_busy(False)
             return
 
-        # "search for ..." -> DuckDuckGo results as Gemini context.
+        # "search for ..." -> DuckDuckGo results as AI context.
         prompt = question
         query = extract_search_query(question)
         if query:
@@ -1803,14 +1954,54 @@ class VoiceAssistantApp:
                 f"User message: {question}"
             )
 
-        self._show_typing()  # animated dots while Gemini thinks
+        self._show_typing()  # animated dots while the AI thinks
         self._set_status("Thinking...")
-        if self.chat is None:
+        if self.ai_provider == AI_PROVIDER_OLLAMA:
+            try:
+                answer = self._ollama_reply(prompt)
+            except Exception as error:  # noqa: BLE001 - fall back to Gemini
+                detail = " ".join(str(error).split()) or type(error).__name__
+                if len(detail) > 180:
+                    detail = detail[:177] + "..."
+                if self.chat is None:
+                    gemini_problem = (self._gemini_error or
+                                      "Gemini API is unavailable.")
+                    if len(gemini_problem) > 160:
+                        gemini_problem = gemini_problem[:157] + "..."
+                    notice = (
+                        f"Local AI at {OLLAMA_HOST} is unavailable ({detail}); "
+                        f"Gemini fallback is unavailable ({gemini_problem})."
+                    )
+                    self._append_message("system", notice)
+                    if self._gemini_error == "Gemini API key is not configured.":
+                        answer = (
+                            "I couldn't reach Local AI, and Gemini fallback isn't "
+                            "configured. Start Ollama or add a Gemini API key in Settings."
+                        )
+                    else:
+                        answer = (
+                            "I couldn't reach Local AI or initialize Gemini. "
+                            "Check that Ollama is running and verify the Gemini settings."
+                        )
+                else:
+                    notice = (
+                        f"Local AI at {OLLAMA_HOST} is unavailable ({detail}); "
+                        "falling back to Gemini API."
+                    )
+                    self._append_message("system", notice)
+                    try:
+                        answer = self._gemini_reply(prompt)
+                        self._remember_ollama_turn(prompt, answer)
+                    except Exception as fallback_error:  # noqa: BLE001
+                        answer = (
+                            "Sorry, Local AI failed and Gemini fallback also "
+                            f"failed: {fallback_error}"
+                        )
+        elif self.chat is None:
             answer = "Set your Gemini API key in the Settings panel to start chatting."
         else:
             try:
-                response = self.chat.send_message(prompt)
-                answer = (response.text or "").strip() or "(no response)"
+                answer = self._gemini_reply(prompt)
             except Exception as error:  # noqa: BLE001 - keep the app alive
                 answer = f"Sorry, I ran into a problem: {error}"
         self._hide_typing()

@@ -20,6 +20,7 @@ The helper functions below mirror the ones in main.py (kept in sync by hand
 so this server has no audio/GUI dependencies and runs on any machine).
 """
 
+import ast
 import json
 import os
 import re
@@ -157,12 +158,33 @@ def save_config(api_key: str, assistant_name: str,
     """Persist the settings back to config.py."""
     apps = allowed_apps if allowed_apps is not None else {}
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.py")
+
+    def existing_setting(name, fallback):
+        """Retain desktop-only settings currently on disk, even if stale in memory."""
+        try:
+            with open(path, encoding="utf-8") as file:
+                source = file.read()
+            match = re.search(rf"(?m)^{re.escape(name)}\s*=\s*(.+)$", source)
+            if match:
+                return ast.literal_eval(match.group(1))
+        except (OSError, SyntaxError, ValueError):
+            pass
+        return fallback
+
+    provider = existing_setting(
+        "AI_PROVIDER", getattr(config, "AI_PROVIDER", "gemini"))
+    model = existing_setting(
+        "OLLAMA_MODEL", getattr(config, "OLLAMA_MODEL", "phi3:mini"))
     content = (
         '"""Configuration settings for the voice assistant."""\n\n'
         "# Get your Gemini API key from Google AI Studio: "
         "https://aistudio.google.com/apikey\n"
         "# NOTE: Do not commit a real API key to a public repository.\n"
         f"GEMINI_API_KEY = {api_key!r}\n\n"
+        "# AI provider used by the desktop app: 'gemini' or 'ollama'.\n"
+        f"AI_PROVIDER = {provider!r}\n\n"
+        "# Ollama model name configured in the desktop app.\n"
+        f"OLLAMA_MODEL = {model!r}\n\n"
         "# Name the assistant introduces itself with "
         "(editable in the app's Settings).\n"
         f"ASSISTANT_NAME = {assistant_name!r}\n\n"
