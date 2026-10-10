@@ -33,7 +33,7 @@
   .header { display: flex; align-items: center; gap: 8px; padding: 4px; }
   .title { font-size: 22px; font-weight: 700; }
   .subtitle { color: var(--muted); font-size: 13px; margin-top: 6px; }
-  #face { width: 92px; height: 92px; margin-right: 14px; flex-shrink: 0; }
+  #face { width: 72px; height: 72px; margin-right: 14px; flex-shrink: 0; }
   .spacer { flex: 1; }
 
   /* Buttons: idle #141414/white text, active white/black text. Mic: white/black */
@@ -92,6 +92,18 @@
   .settings input:focus { border-color: var(--white); }
   .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
 
+  .avatar-options { display: grid; gap: 6px; }
+  .avatar-option {
+    display: flex; align-items: center; gap: 9px; padding: 8px 9px;
+    background: var(--gray); border: 1px solid var(--border); cursor: pointer;
+  }
+  .avatar-option.selected { border-color: var(--white); }
+  .avatar-option input { accent-color: var(--white); margin: 0; }
+  .avatar-option span { font-size: 12px; }
+  .avatar-help { color: var(--muted); font-size: 11px; line-height: 1.45; margin-top: 7px; }
+  .avatar-gallery-link { display:block; margin-top:8px; color:var(--muted); font-size:11px; text-align:center; }
+  .avatar-gallery-link:hover { color:var(--white); }
+
   /* Speed slider */
   input[type=range] {
     width: 100%; -webkit-appearance: none; appearance: none;
@@ -128,16 +140,7 @@
 
 <div class="main">
   <div class="header">
-    <svg id="face" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-      <g id="faceBob">
-        <circle cx="53" cy="51.8" r="42" fill="#8C8C8C"/>
-        <circle cx="50" cy="50" r="42" fill="#FAFAFA"/>
-        <ellipse id="blushL" cx="25.6" cy="67.6" rx="5.2" ry="3.6" fill="#8C8C8C" opacity="0.55"/>
-        <ellipse id="blushR" cx="74.4" cy="67.6" rx="5.2" ry="3.6" fill="#8C8C8C" opacity="0.55"/>
-        <line id="eyeL" x1="34.5" y1="43.4" x2="34.5" y2="60.6" stroke="#000" stroke-width="8.6" stroke-linecap="round"/>
-        <line id="eyeR" x1="65.5" y1="43.4" x2="65.5" y2="60.6" stroke="#000" stroke-width="8.6" stroke-linecap="round"/>
-      </g>
-    </svg>
+    <nova-avatar id="face" mode="portrait" state="idle" size="72"></nova-avatar>
     <div>
       <div class="title">Nova</div>
       <div class="subtitle">voice assistant</div>
@@ -181,6 +184,14 @@
   <input type="password" id="key" value="YOUR_GEMINI_API_KEY_HERE">
   <div class="hint">Stored in config.py</div>
 
+  <span class="label" id="avatar-selector">AVATAR</span>
+  <div class="avatar-options" role="radiogroup" aria-label="Avatar style">
+    <label class="avatar-option selected"><input type="radio" name="avatarMode" value="portrait" checked><span>Animated portrait</span></label>
+    <label class="avatar-option"><input type="radio" name="avatarMode" value="grokbot"><span>Classic Grok Bot</span></label>
+    <label class="avatar-option"><input type="radio" name="avatarMode" value="image"><span>Static image</span></label>
+  </div>
+  <div class="avatar-help">The portrait is redrawn and animated. No avatar state draws a mouth. Choice is saved for this browser preview.</div>
+
   <span class="label">VOICE SPEED</span>
   <input type="range" min="0" max="2" step="1" value="1" id="speed"
          oninput="document.getElementById('speedVal').textContent=['Slow','Normal','Fast'][this.value]">
@@ -199,10 +210,12 @@
   </div>
 
   <button class="save-btn" onclick="saveSettings()">Save settings</button>
+  <a class="avatar-gallery-link" href="avatars.html">Compare avatar choices and emotions</a>
 </div>
 
 <div class="banner"><b>UI preview</b> — live demo of the tkinter app's design &amp; flows (the desktop app itself runs on your PC: <b>python main.py</b>)</div>
 
+<script src="avatar-preview.js"></script>
 <script>
 const chat = document.getElementById('chat');
 const statusEl = document.getElementById('status');
@@ -214,13 +227,9 @@ function setStatus(t) {
   setEmotion(inferEmotion(t));
 }
 
-/* ---- Bubbly face (mirrors BubblyFace in main.py) ---- */
-const F = {
-  bob: document.getElementById('faceBob'),
-  eyeL: document.getElementById('eyeL'), eyeR: document.getElementById('eyeR'),
-  blushL: document.getElementById('blushL'), blushR: document.getElementById('blushR'),
-};
-let emotion = 'idle', faceT = 0, blinkIn = 3.0, blinkLeft = 0, lastTs = 0;
+/* ---- Shared reference-redrawn avatar and preview selector ---- */
+const facePreview = document.getElementById('face');
+let emotion = 'idle';
 
 function inferEmotion(text) {
   const s = text.toLowerCase();
@@ -231,51 +240,41 @@ function inferEmotion(text) {
   if (['copied', 'saved', 'cleared', 'added', 'removed', 'got it', "i'll remember"].some(g => s.includes(g))) return 'happy';
   return 'idle';
 }
-function setEmotion(e) {
-  if (['idle', 'happy', 'listening', 'thinking', 'talking', 'sad'].includes(e)) emotion = e;
+
+function setEmotion(next) {
+  if (!['idle', 'happy', 'listening', 'thinking', 'talking', 'sad'].includes(next)) return;
+  emotion = next;
+  facePreview.setAttribute('state', emotion);
 }
 
-function faceFrame(ts) {
-  const dt = lastTs ? Math.min((ts - lastTs) / 1000, 0.1) : 0.08;
-  lastTs = ts;
-  faceT += dt;
-  blinkIn -= dt;
-  if (blinkLeft > 0) blinkLeft -= dt;
-  else if (blinkIn <= 0) { blinkLeft = 0.12; blinkIn = 2.6 + Math.random() * 3.0; }
-
-  const emo = emotion;
-  // Calm pearl head: a slow, tiny breath; perfectly still while talking
-  const breath = emo === 'talking' ? 0 : Math.sin(faceT * 0.8);
-  const dy = breath * 0.6, sq = breath * 0.004;
-  F.bob.setAttribute('transform',
-    `translate(50 50) scale(${(1 + sq).toFixed(4)} ${(1 - sq).toFixed(4)}) translate(-50 -50) translate(0 ${dy.toFixed(2)})`);
-
-  // 1:1 Grok Bot: twin capsule eyes carry the whole expression
-  const blinking = blinkLeft > 0;
-  let w = 8.6, h = 8.6, shear = 0, dx = 0, ey = 52;
-  if (emo === 'listening') { w *= 1.18; h *= 1.24; ey -= 1.8; }
-  else if (emo === 'thinking') { dx = Math.sin(faceT * 0.9) * 1.8 - 1.2; ey -= 1.6; }
-  else if (emo === 'sad') { w *= 0.86; h *= 0.9; ey += 1.8; shear = -1.4; }
-  else if (emo === 'happy') { w *= 1.32; h *= 0.78; ey -= 0.8; shear = 2.0; }
-  else if (emo === 'talking') { h *= 0.85 + 0.4 * Math.abs(Math.sin(faceT * 9)); }
-  else { dx = Math.sin(faceT * 0.5) * 0.6; }
-  if (blinking) h = w * 0.12;
-
-  for (const [eye, side] of [[F.eyeL, -1], [F.eyeR, 1]]) {
-    const ex = 50 + side * 15.5 + dx;
-    const tip = -side * shear;
-    eye.setAttribute('x1', (ex - tip).toFixed(2)); eye.setAttribute('y1', (ey - h).toFixed(2));
-    eye.setAttribute('x2', (ex + tip).toFixed(2)); eye.setAttribute('y2', (ey + h).toFixed(2));
-    eye.setAttribute('stroke-width', w.toFixed(2));
+function applyAvatarMode(mode) {
+  if (!['portrait', 'grokbot', 'image'].includes(mode)) mode = 'portrait';
+  facePreview.setAttribute('mode', mode);
+  for (const label of document.querySelectorAll('.avatar-option')) {
+    const radio = label.querySelector('input');
+    radio.checked = radio.value === mode;
+    label.classList.toggle('selected', radio.checked);
   }
-  const boost = emo === 'happy' ? 1.15 : 1.0;
-  for (const [blush, side] of [[F.blushL, -1], [F.blushR, 1]]) {
-    blush.setAttribute('rx', (5.2 * boost).toFixed(2));
-    blush.setAttribute('ry', (3.6 * boost).toFixed(2));
-  }
-  requestAnimationFrame(faceFrame);
 }
-requestAnimationFrame(faceFrame);
+
+for (const radio of document.querySelectorAll('input[name="avatarMode"]')) {
+  radio.addEventListener('change', () => {
+    for (const label of document.querySelectorAll('.avatar-option'))
+      label.classList.toggle('selected', label.querySelector('input').checked);
+  });
+}
+
+try {
+  const savedMode = localStorage.getItem('voice-assistant-avatar-mode') || 'portrait';
+  applyAvatarMode(savedMode);
+} catch (_) {
+  applyAvatarMode('portrait');
+}
+facePreview.addEventListener('avatarfallback', event => {
+  applyAvatarMode('grokbot');
+  try { localStorage.setItem('voice-assistant-avatar-mode', 'grokbot'); } catch (_) {}
+  setStatus(event.detail.message);
+});
 
 function addMsg(role, text) {
   const name = role === 'user' ? 'You' : role === 'system' ? 'Notice' : document.getElementById('name').value || 'Nova';
@@ -423,8 +422,11 @@ function removeApp() {
 }
 
 function saveSettings() {
-  setStatus('Settings saved.');
-  setTimeout(() => setStatus(idleStatus()), 1200);
+  const mode = document.querySelector('input[name="avatarMode"]:checked')?.value || 'portrait';
+  applyAvatarMode(mode);
+  try { localStorage.setItem('voice-assistant-avatar-mode', mode); } catch (_) {}
+  setStatus('Settings saved. Avatar choice saved for this preview.');
+  setTimeout(() => setStatus(idleStatus()), 1600);
 }
 </script>
 </body>

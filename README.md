@@ -186,6 +186,10 @@ typing always works.
 
 > Every change to this project is recorded here as key points, newest first.
 
+**2026-10-10 — Browser preview synced with avatar selector**
+- `preview/index.html` now uses the same drawn, mouthless animated portrait and includes the three persisted Settings modes; its choice is saved locally in the browser.
+- `preview/avatars.html` compares Animated portrait, Classic Grok Bot, and Static image across the same emotion states, using a shared renderer in `preview/avatar-preview.js`.
+
 **2026-10-10 — Mouthless animated portrait redraw**
 - Redrew the reference as Pillow-rendered shapes rather than displaying the supplied image; the portrait breathes through subtle head/shoulder movement and expresses itself through eyes, brows, gaze, and blush.
 - No mouth is drawn in any state, including while speaking. Listening/speaking retain the animated wave indicator; thinking retains its dots.
