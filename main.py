@@ -101,8 +101,8 @@ DEFAULT_AVATAR_MODE = (AVATAR_MODE_IMAGE if USE_IMAGE_AVATAR else AVATAR_STYLE)
 AVATAR_FILE = "avatar.png"  # reference artwork and optional still avatar
 
 # Wake-word listener (shares the single mic stream with question recording)
-WAKE_CHECK_SECONDS = 2.0  # how often the rolling wake buffer is transcribed
-WAKE_WINDOW_SECONDS = 3.0  # rolling 3-second wake buffer sent to recognition
+WAKE_CHECK_SECONDS = 0.3  # how often the rolling wake buffer is transcribed
+WAKE_WINDOW_SECONDS = 1.5  # rolling 1.5-second wake buffer sent to recognition
 
 # Microphone recording settings
 SAMPLE_RATE = 16000  # samples per second
@@ -1199,7 +1199,7 @@ class VoiceAssistantApp:
         # 'question' (chunks are captured into _question_chunks).
         self._listening_mode = "wake"
         self._mic_queue = queue.Queue()  # every chunk from the shared stream
-        self._wake_buffer = collections.deque(  # rolling 3-second buffer
+        self._wake_buffer = collections.deque(  # rolling 1.5-second buffer
             maxlen=max(int(WAKE_WINDOW_SECONDS / CHUNK_SECONDS), 2))
         self._question_chunks: list = []  # chunks while capturing a question
         self._mic_lock = threading.Lock()  # guards the rolling wake buffer
@@ -1965,7 +1965,13 @@ class VoiceAssistantApp:
             "Say 'help' to hear what I can do."
         )
         self._append_message("assistant", greeting)
-        threading.Thread(target=self._speak, args=(greeting,), daemon=True).start()
+        threading.Thread(target=self._delayed_greeting, args=(greeting,),
+                         daemon=True).start()
+
+    def _delayed_greeting(self, greeting: str) -> None:
+        """Wait for startup audio to settle before speaking the greeting."""
+        time.sleep(2.0)
+        self._speak(greeting)
 
     def _speak(self, text: str) -> None:
         """Speak a line at the selected speed; cancel via the red Mic button."""
