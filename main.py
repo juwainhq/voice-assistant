@@ -1450,6 +1450,29 @@ class VoiceAssistantApp:
                  bg=BG, fg=MUTED).pack(anchor="w", pady=(8, 0))
         self.ollama_model_entry = _entry(parent=self._ollama_fields)
         self.ollama_model_entry.insert(0, self.ollama_model)
+
+        def _test_ollama():
+            try:
+                import requests as _req
+                r = _req.get(f"{OLLAMA_HOST}/api/tags", timeout=3)
+                models = [m["name"] for m in r.json().get("models", [])]
+                if models:
+                    msg = f"Ollama connected! Available models: {', '.join(models)}"
+                else:
+                    msg = "Ollama connected but no models found. Run: ollama pull phi3:mini"
+            except Exception as e:
+                msg = f"Cannot reach Ollama at {OLLAMA_HOST}. Is Ollama running? Error: {e}"
+            import tkinter.messagebox as mb
+            mb.showinfo("Ollama Status", msg)
+
+        tk.Button(
+            self._ollama_fields,
+            text="Test Connection",
+            command=_test_ollama,
+            bg=GRAY, fg=TEXT, font=FONT_SMALL,
+            relief=tk.FLAT, cursor="hand2"
+        ).pack(anchor=tk.W, pady=(4, 0))
+
         tk.Label(
             self._ollama_fields,
             text=f"Default: {DEFAULT_OLLAMA_MODEL} · Server: {OLLAMA_HOST}",
@@ -1665,12 +1688,10 @@ class VoiceAssistantApp:
                 model=self.ollama_model,
                 messages=messages,
             )
-        except Exception as error:
+        except Exception as e:
             raise RuntimeError(
-                "Cannot connect to Ollama. Make sure Ollama is running "
-                "(open Ollama app or run 'ollama serve' in terminal). "
-                f"Error: {error}"
-            ) from error
+                f"Ollama error (model='{self.ollama_model}', host={OLLAMA_HOST}): {e}"
+            ) from e
         message = (response.get("message") if isinstance(response, dict)
                    else getattr(response, "message", None))
         content = (message.get("content", "") if isinstance(message, dict)
@@ -2350,8 +2371,8 @@ class VoiceAssistantApp:
                 answer = self._ollama_reply(prompt)
             except Exception as error:  # noqa: BLE001 - fall back to Gemini
                 detail = " ".join(str(error).split()) or type(error).__name__
-                if len(detail) > 180:
-                    detail = detail[:177] + "..."
+                if len(detail) > 400:
+                    detail = detail[:397] + "..."
                 if self.chat is None:
                     gemini_problem = (self._gemini_error or
                                       "Gemini API is unavailable.")
