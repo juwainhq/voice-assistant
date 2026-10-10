@@ -2017,11 +2017,20 @@ class VoiceAssistantApp:
         self._speaking_event.set()
         self._set_status("Speaking...")
         self._set_mic_speaking(True)
-        with self.speech_lock:
-            speak(text, self._speed, cancel)
-        self._speaking_event.clear()
-        self._set_mic_speaking(False)
-        self._set_idle_status()
+        try:
+            with self.speech_lock:
+                try:
+                    speak(text, self._speed, cancel)
+                except Exception as error:  # noqa: BLE001 - try offline audio
+                    print(f"[speech] primary playback failed: {error}; trying offline TTS")
+                    try:
+                        _speak_offline(text, self._speed, cancel)
+                    except Exception as offline_error:  # noqa: BLE001 - preserve worker
+                        print(f"[speech] offline playback failed: {offline_error}")
+        finally:
+            self._speaking_event.clear()
+            self._set_mic_speaking(False)
+            self._set_idle_status()
 
     def _mic_thread(self) -> None:
         """Open the ONE shared mic stream and feed _mic_queue for the app's life.
