@@ -101,13 +101,14 @@ DEFAULT_AVATAR_MODE = (AVATAR_MODE_IMAGE if USE_IMAGE_AVATAR else AVATAR_STYLE)
 AVATAR_FILE = "avatar.png"  # reference artwork and optional still avatar
 
 # Wake-word listener (shares the single mic stream with question recording)
-WAKE_CHECK_SECONDS = 0.3  # how often the rolling wake buffer is transcribed
-WAKE_WINDOW_SECONDS = 1.5  # rolling 1.5-second wake buffer sent to recognition
+WAKE_CHECK_SECONDS = 0.5  # how often the rolling wake buffer is transcribed
+WAKE_WINDOW_SECONDS = 2.0  # rolling 2-second wake buffer sent to recognition
 
 # Microphone recording settings
 SAMPLE_RATE = 16000  # samples per second
 CHUNK_SECONDS = 0.1  # how often the mic level is checked
-SILENCE_THRESHOLD = 0.01  # RMS level treated as speech vs. silence
+SILENCE_THRESHOLD = 0.005  # RMS level treated as speech vs. silence
+WAKE_RMS_THRESHOLD = 0.008  # minimum sound level to bother transcribing
 WAIT_FOR_SPEECH_SECONDS = 5  # give up if the user says nothing
 SILENCE_SECONDS = 0.8  # stop recording 0.8 s after you finish speaking
 MAX_SECONDS = 10  # hard cap on one recording
@@ -140,15 +141,17 @@ FONT_SECTION = ("Segoe UI", 12, "bold")
 
 
 
+_RECOGNIZER = sr.Recognizer()
+
+
 def transcribe(audio: sr.AudioData) -> str | None:
     """Convert recorded audio to text with Google speech recognition.
 
     Any failure (including missing audioop on new Python versions) is
     swallowed so the listening threads never die silently.
     """
-    recognizer = sr.Recognizer()
     try:
-        return recognizer.recognize_google(audio)
+        return _RECOGNIZER.recognize_google(audio)
     except sr.UnknownValueError:
         return None
     except Exception as error:  # noqa: BLE001 - keep the listener alive
@@ -1199,7 +1202,7 @@ class VoiceAssistantApp:
         # 'question' (chunks are captured into _question_chunks).
         self._listening_mode = "wake"
         self._mic_queue = queue.Queue()  # every chunk from the shared stream
-        self._wake_buffer = collections.deque(  # rolling 1.5-second buffer
+        self._wake_buffer = collections.deque(  # rolling 2-second buffer
             maxlen=max(int(WAKE_WINDOW_SECONDS / CHUNK_SECONDS), 2))
         self._question_chunks: list = []  # chunks while capturing a question
         self._mic_lock = threading.Lock()  # guards the rolling wake buffer
@@ -1657,10 +1660,17 @@ class VoiceAssistantApp:
         ]
         if self._ollama_client is None:
             self._ollama_client = ollama.Client(host=OLLAMA_HOST)
-        response = self._ollama_client.chat(
-            model=self.ollama_model,
-            messages=messages,
-        )
+        try:
+            response = self._ollama_client.chat(
+                model=self.ollama_model,
+                messages=messages,
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "Cannot connect to Ollama. Make sure Ollama is running "
+                "(open Ollama app or run 'ollama serve' in terminal). "
+                f"Error: {error}"
+            ) from error
         message = (response.get("message") if isinstance(response, dict)
                    else getattr(response, "message", None))
         content = (message.get("content", "") if isinstance(message, dict)
@@ -1965,6 +1975,13 @@ class VoiceAssistantApp:
             "Say 'help' to hear what I can do."
         )
         self._append_message("assistant", greeting)
+        if self.ai_provider == AI_PROVIDER_OLLAMA:
+            self.root.after(500, lambda: self._append_message(
+                "system",
+                f"Local AI mode: Ollama with model '{self.ollama_model}'. "
+                "If responses fail, open the Ollama app or run 'ollama serve' in your terminal."
+            ))
+
         def _delayed_speak():
             time.sleep(2.5)
             self._speak(greeting)
@@ -2043,7 +2060,7 @@ class VoiceAssistantApp:
 
         While _listening_mode == 'wake' chunks fill the rolling wake buffer;
         while it is 'question' they are captured for the question collector.
-        This thread also runs the wake-word check every 2 seconds.
+        This thread also schedules wake-word checks at WAKE_CHECK_SECONDS intervals.
         """
         while self._running:
             try:
@@ -2088,7 +2105,7 @@ class VoiceAssistantApp:
         # Lightweight gate: only spend a transcription on sound.
         rms = (float(np.sqrt(np.mean(audio_np ** 2)))
                if audio_np.size else 0.0)
-        if rms < SILENCE_THRESHOLD:
+        if rms < WAKE_RMS_THRESHOLD:
             return
         pcm = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
         text = transcribe(sr.AudioData(pcm, self._mic_rate, 2))
