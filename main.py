@@ -119,31 +119,6 @@ FONT_SECTION = ("Segoe UI", 12, "bold")
 # Voice I/O, web search, commands, and config helpers
 # ----------------------------------------------------------------------------
 
-def _open_input_stream(callback):
-    """Open a mic stream, trying common configs until one is accepted.
-
-    Some devices reject 16 kHz or mono. Failing silently on those machines
-    made it look like the assistant "wasn't listening", so try a few configs.
-    """
-    try:
-        device_rate = int(sd.query_devices(kind="input")["default_samplerate"])
-    except Exception:  # noqa: BLE001 - no device info available
-        device_rate = SAMPLE_RATE
-    last_error = None
-    for rate, channels in ((SAMPLE_RATE, 1), (SAMPLE_RATE, 2),
-                           (device_rate, 1), (device_rate, 2)):
-        try:
-            stream = sd.InputStream(
-                samplerate=rate,
-                channels=channels,
-                dtype="float32",
-                blocksize=max(int(rate * CHUNK_SECONDS), 128),
-                callback=callback,
-            )
-            return stream, rate
-        except Exception as error:  # noqa: BLE001 - try the next config
-            last_error = error
-    raise RuntimeError(f"Could not open the microphone: {last_error}")
 
 
 
@@ -851,17 +826,19 @@ class VoiceAssistantApp:
         self._busy_event = threading.Event()  # set while listening/thinking
         self._speaking_event = threading.Event()  # set while TTS plays
         self._speech_cancel = threading.Event()  # set to stop playback
-        # _wake_mode switches the ONE shared mic stream between its two
-        # consumers: set = wake mode (rolling wake buffer), clear = question
-        # mode (chunks go to the question queue while a question is recorded).
-        self._wake_mode = threading.Event()
-        self._wake_mode.set()
-        self._wake_queue = collections.deque(  # rolling 3-second buffer
+        # _listening_mode switches the ONE shared mic stream between its two
+        # consumers: 'wake' (chunks fill the rolling wake buffer) or
+        # 'question' (chunks are captured into _question_chunks).
+        self._listening_mode = "wake"
+        self._mic_queue = queue.Queue()  # every chunk from the shared stream
+        self._wake_buffer = collections.deque(  # rolling 3-second buffer
             maxlen=max(int(WAKE_WINDOW_SECONDS / CHUNK_SECONDS), 2))
-        self._question_queue = queue.Queue()  # chunks while recording a question
+        self._question_chunks: list = []  # chunks while capturing a question
         self._mic_lock = threading.Lock()  # guards the rolling wake buffer
+        self._chunks_lock = threading.Lock()  # guards _question_chunks
         self._mic_rate = SAMPLE_RATE
         self._wake_last_check = 0.0
+        self._wake_unclear = 0
         self._running = True
         self._speed = "normal"
         self._last_answer = ""
@@ -886,8 +863,10 @@ class VoiceAssistantApp:
         init_offline_speech()  # pyttsx3 fallback engine, created once
         self._greet()
         self._setup_tray()
-        threading.Thread(target=self._mic_stream_worker, daemon=True).start()
-        threading.Thread(target=self._wake_word_worker, daemon=True).start()
+        threading.Thread(target=self._mic_thread, name="_mic_thread",
+                         daemon=True).start()
+        threading.Thread(target=self._audio_router_thread,
+                         name="_audio_router_thread", daemon=True).start()
 
     # ----- UI construction ---------------------------------------------------
 
@@ -1323,6 +1302,7 @@ class VoiceAssistantApp:
         if self._speaking_event.is_set():
             self._stop_speaking()
             return
+        self._switch_listening("question")  # switch the shared stream directly
         threading.Thread(target=self._listen_worker, daemon=True).start()
 
     def _on_speed_change(self) -> None:
@@ -1480,18 +1460,39 @@ class VoiceAssistantApp:
         self._set_mic_speaking(False)
         self._set_idle_status()
 
-    def _mic_stream_worker(self) -> None:
-        """Own the ONE shared mic stream for the whole session.
+    def _mic_thread(self) -> None:
+        """Open the ONE shared mic stream and feed _mic_queue for the app's life.
 
-        Windows audio drivers often allow only a single open InputStream, so
-        exactly one stream stays open here. Its callback feeds the rolling
-        wake buffer or the question queue depending on _wake_mode. If the
-        stream ever stops (driver glitch, sd.stop()) it is reopened.
+        Windows drivers allow only a single sd.InputStream, so this is the
+        only place in the whole program where a stream is opened. It tries
+        common device configs and reopens the stream if it ever stops.
         """
         while self._running:
             try:
-                stream, rate = _open_input_stream(self._mic_callback)
-                self._mic_rate = rate
+                try:
+                    device_rate = int(
+                        sd.query_devices(kind="input")["default_samplerate"])
+                except Exception:  # noqa: BLE001 - no device info available
+                    device_rate = SAMPLE_RATE
+                stream = None
+                last_error = None
+                for rate, channels in ((SAMPLE_RATE, 1), (SAMPLE_RATE, 2),
+                                       (device_rate, 1), (device_rate, 2)):
+                    try:
+                        stream = sd.InputStream(
+                            samplerate=rate,
+                            channels=channels,
+                            dtype="float32",
+                            blocksize=max(int(rate * CHUNK_SECONDS), 128),
+                            callback=self._mic_callback,
+                        )
+                        self._mic_rate = rate
+                        break
+                    except Exception as error:  # noqa: BLE001 - try next
+                        last_error = error
+                if stream is None:
+                    raise RuntimeError(
+                        f"Could not open the microphone: {last_error}")
                 stream.start()
                 try:
                     while self._running and stream.active:
@@ -1503,145 +1504,152 @@ class VoiceAssistantApp:
                     except Exception:  # noqa: BLE001 - already closed
                         pass
                 if self._running:
-                    print("[mic stream] stream stopped - reopening")
+                    print("[mic] stream stopped - reopening")
                     time.sleep(0.5)
             except Exception as error:  # noqa: BLE001 - must never die
-                print(f"[mic stream] {error}")
+                print(f"[mic] {error}")
                 time.sleep(1.0)
 
     def _mic_callback(self, indata, frames, time_info, status) -> None:
-        """Route mic audio: wake buffer when idle, question queue when recording."""
+        """The shared stream's callback: every chunk goes into _mic_queue."""
         mono = indata.mean(axis=1) if indata.ndim > 1 else indata
-        if self._wake_mode.is_set():
-            with self._mic_lock:
-                self._wake_queue.append(mono.copy())
-        else:
-            self._question_queue.put(mono.copy())
+        self._mic_queue.put(mono.copy())
 
-    def _record_question(self) -> sr.AudioData | None:
-        """Record one spoken question from the shared stream.
+    def _audio_router_thread(self) -> None:
+        """Route chunks from _mic_queue to the wake buffer or question list.
 
-        Switches _wake_mode off so the mic callback feeds the question
-        queue, records until the speaker goes quiet (0.8 s of silence), and
-        switches the mic back to wake mode when done. Returns None when no
-        speech was heard.
+        While _listening_mode == 'wake' chunks fill the rolling wake buffer;
+        while it is 'question' they are captured for the question collector.
+        This thread also runs the wake-word check every 2 seconds.
         """
-        while True:  # drop stale chunks from a previous recording
+        while self._running:
             try:
-                self._question_queue.get_nowait()
-            except queue.Empty:
-                break
-        self._wake_mode.clear()
-        try:
-            chunks: list[np.ndarray] = []
-            heard_speech = False
-            silent_chunks = 0
-            start = time.monotonic()
-            while True:
                 try:
-                    chunk = self._question_queue.get(timeout=CHUNK_SECONDS)
+                    chunk = self._mic_queue.get(timeout=CHUNK_SECONDS)
                 except queue.Empty:
                     chunk = None
                 if chunk is not None:
-                    chunks.append(chunk)
-                    rms = (float(np.sqrt(np.mean(chunk ** 2)))
-                           if chunk.size else 0.0)
-                    if rms >= SILENCE_THRESHOLD:
-                        heard_speech = True
-                        silent_chunks = 0
+                    if self._listening_mode == "wake":
+                        with self._mic_lock:
+                            self._wake_buffer.append(chunk)
                     else:
-                        silent_chunks += 1
-                elapsed = time.monotonic() - start
-                if not heard_speech and elapsed >= WAIT_FOR_SPEECH_SECONDS:
-                    return None
-                if (heard_speech and
-                        silent_chunks * CHUNK_SECONDS >= SILENCE_SECONDS):
-                    break
-                if elapsed >= MAX_SECONDS:
-                    break
-            if not heard_speech or not chunks:
-                return None
-            audio = np.concatenate(chunks, axis=0)
-            mono = audio.mean(axis=1) if audio.ndim > 1 else audio
-            pcm = (np.clip(mono, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
-            return sr.AudioData(pcm, self._mic_rate, 2)
-        finally:
-            self._wake_mode.set()
-
-    def _wake_word_worker(self) -> None:
-        """Wake-word listener over the shared mic's rolling buffer.
-
-        There is only ONE open InputStream (owned by _mic_stream_worker):
-        this worker just transcribes the rolling wake buffer every
-        WAKE_CHECK_SECONDS and activates when the text contains the
-        assistant's name. Recording the question goes through the same
-        shared stream via the question queue (_wake_mode switches modes).
-        The loop never dies.
-        """
-        unclear = 0
-        while self._running:
-            try:
-                time.sleep(CHUNK_SECONDS)
+                        with self._chunks_lock:
+                            self._question_chunks.append(chunk)
                 now = time.monotonic()
-                if now - self._wake_last_check < WAKE_CHECK_SECONDS:
-                    continue
-                self._wake_last_check = now
-                if not self._wake_mode.is_set():
-                    continue  # busy recording a question on the same stream
-                if self._busy_event.is_set() or self._speaking_event.is_set():
-                    continue
-                with self._mic_lock:
-                    chunks = list(self._wake_queue)
-                if not chunks:
-                    continue
-                audio_np = np.concatenate(chunks, axis=0)
-                # Lightweight gate: only spend a transcription on sound.
-                rms = (float(np.sqrt(np.mean(audio_np ** 2)))
-                       if audio_np.size else 0.0)
-                if rms < SILENCE_THRESHOLD:
-                    continue
-                pcm = (np.clip(audio_np, -1.0, 1.0) * 32767
-                       ).astype(np.int16).tobytes()
-                text = transcribe(sr.AudioData(pcm, self._mic_rate, 2))
-                if not text:
-                    unclear += 1
-                    if unclear >= 5:
-                        unclear = 0
-                        self._set_status(
-                            "Wake listener is running but can't understand "
-                            "audio — check the mic and internet connection."
-                        )
-                    continue
-                unclear = 0
-                if not re.search(rf"\b{re.escape(self.assistant_name)}\b",
-                                 text, re.IGNORECASE):
-                    continue
-                # Wake phrase confirmed: show the window, beep, then talk.
-                self.root.after(0, self._restore_window)
-                play_tone(880, 0.12)
-                question = extract_wake_question(text, self.assistant_name) or ""
-                threading.Thread(target=self._listen_worker,
-                                 args=(question,), daemon=True).start()
+                if (self._listening_mode == "wake"
+                        and now - self._wake_last_check >= WAKE_CHECK_SECONDS):
+                    self._wake_last_check = now
+                    if not (self._busy_event.is_set()
+                            or self._speaking_event.is_set()):
+                        self._check_wake_buffer()
             except Exception as error:  # noqa: BLE001 - must never die
-                print(f"[wake listener] {error}")
-                time.sleep(1.0)
+                print(f"[audio router] {error}")
+                time.sleep(0.5)
+
+    def _switch_listening(self, mode: str) -> None:
+        """Switch the shared stream's routing between 'wake' and 'question'."""
+        if mode == self._listening_mode:
+            return
+        if mode == "question":
+            with self._chunks_lock:
+                self._question_chunks.clear()  # capture starts fresh
+        self._listening_mode = mode
+
+    def _check_wake_buffer(self) -> None:
+        """Transcribe the rolling wake buffer and activate on the name."""
+        with self._mic_lock:
+            chunks = list(self._wake_buffer)
+        if not chunks:
+            return
+        audio_np = np.concatenate(chunks, axis=0)
+        # Lightweight gate: only spend a transcription on sound.
+        rms = (float(np.sqrt(np.mean(audio_np ** 2)))
+               if audio_np.size else 0.0)
+        if rms < SILENCE_THRESHOLD:
+            return
+        pcm = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        text = transcribe(sr.AudioData(pcm, self._mic_rate, 2))
+        if not text:
+            self._wake_unclear += 1
+            if self._wake_unclear >= 5:
+                self._wake_unclear = 0
+                self._set_status(
+                    "Wake listener is running but can't understand "
+                    "audio — check the mic and internet connection."
+                )
+            return
+        self._wake_unclear = 0
+        if not re.search(rf"\b{re.escape(self.assistant_name)}\b",
+                         text, re.IGNORECASE):
+            return
+        # Wake phrase confirmed: switch to question mode, beep, then collect.
+        self.root.after(0, self._restore_window)
+        question = extract_wake_question(text, self.assistant_name) or ""
+        self._switch_listening("question")
+        play_tone(880, 0.12)
+        threading.Thread(target=self._listen_worker,
+                         args=(question,), daemon=True).start()
+
+    def _collect_question(self) -> sr.AudioData | None:
+        """Collect one question from _question_chunks with silence detection.
+
+        The router fills the list while _listening_mode == 'question'; this
+        waits for speech and stops 0.8 s after the speaker goes quiet.
+        Returns None when no speech was heard.
+        """
+        chunks: list[np.ndarray] = []
+        heard_speech = False
+        silent_chunks = 0
+        taken = 0
+        start = time.monotonic()
+        while True:
+            time.sleep(CHUNK_SECONDS)
+            with self._chunks_lock:
+                new = self._question_chunks[taken:]
+                taken = len(self._question_chunks)
+            for chunk in new:
+                chunks.append(chunk)
+                rms = (float(np.sqrt(np.mean(chunk ** 2)))
+                       if chunk.size else 0.0)
+                if rms >= SILENCE_THRESHOLD:
+                    heard_speech = True
+                    silent_chunks = 0
+                else:
+                    silent_chunks += 1
+            elapsed = time.monotonic() - start
+            if not heard_speech and elapsed >= WAIT_FOR_SPEECH_SECONDS:
+                return None
+            if (heard_speech and
+                    silent_chunks * CHUNK_SECONDS >= SILENCE_SECONDS):
+                break
+            if elapsed >= MAX_SECONDS:
+                break
+        if not heard_speech or not chunks:
+            return None
+        audio = np.concatenate(chunks, axis=0)
+        mono = audio.mean(axis=1) if audio.ndim > 1 else audio
+        pcm = (np.clip(mono, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        return sr.AudioData(pcm, self._mic_rate, 2)
 
     def _listen_worker(self, question: str | None = None) -> None:
-        """Record (or take) one question and answer it."""
+        """Collect one question from the shared stream and answer it."""
         self._busy_event.set()
         self._set_busy(True)
         if not question:
             self._set_status("Listening...")
-            with self._audio_lock:
-                try:
-                    audio = self._record_question()
-                except Exception as error:  # noqa: BLE001 - fall back to typing
-                    self._append_message("system", f"Microphone failed: {error}. "
-                                                   "Type your message instead.")
-                    self._set_status("Mic failed — type instead")
-                    self._busy_event.clear()
-                    self._set_busy(False)
-                    return
+            self._switch_listening("question")
+            try:
+                with self._audio_lock:
+                    audio = self._collect_question()
+            except Exception as error:  # noqa: BLE001 - fall back to typing
+                self._switch_listening("wake")
+                self._append_message("system", f"Microphone failed: {error}. "
+                                               "Type your message instead.")
+                self._set_status("Mic failed — type instead")
+                self._busy_event.clear()
+                self._set_busy(False)
+                return
+            self._switch_listening("wake")  # capture done - back to wake
             if audio is None:
                 self._append_message("system",
                                      "I didn't hear anything. Try again.")
@@ -1656,6 +1664,8 @@ class VoiceAssistantApp:
                 self._busy_event.clear()
                 self._set_busy(False)
                 return
+        else:
+            self._switch_listening("wake")  # inline question - nothing to collect
         self._append_message("user", question)
         self._ask_worker(question)
 

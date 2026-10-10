@@ -35,10 +35,11 @@ memories and Allowed Apps stay in sync everywhere.
 
 1. **Wake word** — a lightweight listener watches for the assistant's name
    ("Nova", "Hey Nova", "Nova, I have a question"). On the desktop there is only
-   ever **one open mic stream** (`sd.InputStream`): a background thread keeps it
-   running and routes its audio into a rolling 3-second **wake buffer** (idle)
-   or a **question queue** (while recording) — a single `_wake_mode` event
-   switches between the two, so Windows audio drivers never see two streams.
+   ever **one open mic stream** (`sd.InputStream`): `_mic_thread` keeps it
+   running and pushes every chunk into `_mic_queue`; `_audio_router_thread`
+   routes chunks by `_listening_mode` — a rolling 3-second `_wake_buffer` deque
+   (idle) or the `_question_chunks` list (while recording) — so Windows audio
+   drivers never see two streams.
    On the phone the browser's speech recognition does the same job.
 2. **Activation** — a confirmation beep plays and the app switches to
    `Listening...` (the mic button listens for your question).
@@ -168,6 +169,13 @@ typing always works.
 ## Updates (key points)
 
 > Every change to this project is recorded here as key points, newest first.
+
+**2026-10-10 — Mic pipeline v2: `_mic_queue` + `_audio_router_thread` (exact spec)**
+- `_mic_thread` opens exactly one `sd.InputStream` and runs permanently, pushing raw chunks into `_mic_queue`.
+- `_audio_router_thread` reads `_mic_queue` and routes chunks by the `_listening_mode` string (starts at `"wake"`): into the rolling `_wake_buffer` (deque, 3 s) in wake mode, or `_question_chunks` (list) in question mode.
+- Wake checker runs every 2 seconds: it transcribes the wake buffer and `re.search`es for the assistant name; on a hit it switches `_listening_mode` to `"question"`, plays the beep, and collects the question (0.8 s silence cutoff).
+- The Mic button switches `_listening_mode` to `"question"` directly; after capture the mode returns to `"wake"` so the wake listener never stops.
+- Removed the leftover multi-stream-era helpers (`_open_input_stream`, `record_question`, the old wake worker) — search, memory, app launcher, UI and tray are unchanged.
 
 **2026-10-10 — Static image avatar with emotion overlays**
 - The header avatar is now a **static `avatar.png`** (loaded from the app folder via `PhotoImage`/PIL `ImageTk`) shown at 64×64 — swap in your own image any time.
