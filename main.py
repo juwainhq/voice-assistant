@@ -1965,13 +1965,10 @@ class VoiceAssistantApp:
             "Say 'help' to hear what I can do."
         )
         self._append_message("assistant", greeting)
-        threading.Thread(target=self._delayed_greeting, args=(greeting,),
-                         daemon=True).start()
-
-    def _delayed_greeting(self, greeting: str) -> None:
-        """Wait for startup audio to settle before speaking the greeting."""
-        time.sleep(2.0)
-        self._speak(greeting)
+        def _delayed_speak():
+            time.sleep(2.5)
+            self._speak(greeting)
+        threading.Thread(target=_delayed_speak, daemon=True).start()
 
     def _speak(self, text: str) -> None:
         """Speak a line at the selected speed; cancel via the red Mic button."""
